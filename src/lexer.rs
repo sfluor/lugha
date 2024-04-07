@@ -67,10 +67,11 @@ impl TokenType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum LexerError {
     Generic(&'static str),
     UnexpectedChar(char, usize, i32),
+    InvalidNumber(String, usize, i32),
     UnknownSingleSymbol(char, usize, i32),
     UnknownMultiSymbol(char, usize, i32),
 }
@@ -169,7 +170,13 @@ impl Lexer {
             // We will validate numbers later on in the parser.
             !c.is_numeric() && c != '_' && c != '.'
         })
-        .map(TokenType::NumberLiteral)
+        .and_then(|x| {
+            if x.chars().filter(|&c| c == '.').count() > 1 {
+                Err(LexerError::InvalidNumber(x, self.pos_in_line, self.line))
+            } else {
+                Ok(TokenType::NumberLiteral(x))
+            }
+        })
     }
 
     fn string(&mut self) -> Result<TokenType, LexerError> {
@@ -377,5 +384,16 @@ mod tests {
         Ok(())
     }
 
-    // TODO number with multiple .
+    #[test]
+    fn test_lex_number_multiple_dots() {
+        let inputs = vec!["0.9.1", "00.11.22", "44......"];
+
+        for input in inputs {
+            let mut lexer = Lexer::new(input.to_string());
+            assert_eq!(
+                lexer.next(),
+                Some(Err(LexerError::InvalidNumber(input.to_string(), 0, 0)))
+            );
+        }
+    }
 }
