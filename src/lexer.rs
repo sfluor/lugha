@@ -1,4 +1,4 @@
-use std::{collections::HashSet, iter::Iterator};
+use std::{collections::HashSet, iter::Iterator, num::ParseIntError};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Token {
@@ -46,12 +46,25 @@ impl SymbolType {
     }
 }
 
+#[derive(Debug)]
+pub struct Float(f64);
+
+impl PartialEq for Float {
+    fn eq(&self, other: &Self) -> bool {
+        // TODO: epsilon ?
+        self.0 == other.0
+    }
+}
+
+impl Eq for Float {}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TokenType {
     Keyword(String),
     Identifier(String),
     StringLiteral(String),
-    NumberLiteral(String),
+    IntLiteral(String, i64),
+    FloatLiteral(String, Float),
     Symbol(SymbolType),
 }
 
@@ -61,7 +74,8 @@ impl TokenType {
             TokenType::Keyword(k) => k.len(),
             TokenType::Identifier(id) => id.len(),
             TokenType::StringLiteral(lit) => lit.len() + 2, // + 2 for the quotes
-            TokenType::NumberLiteral(lit) => lit.len(),
+            TokenType::IntLiteral(lit, _) => lit.len(),
+            TokenType::FloatLiteral(lit, _) => lit.len(),
             TokenType::Symbol(s) => s.len(),
         }
     }
@@ -175,12 +189,18 @@ impl Lexer {
             // We will validate numbers later on in the parser.
             !c.is_numeric() && c != '_' && c != '.'
         })
-        .and_then(|x| {
-            if x.chars().filter(|&c| c == '.').count() > 1 {
-                Err(LexerError::InvalidNumber(x, self.pos_in_line, self.line))
-            } else {
-                Ok(TokenType::NumberLiteral(x))
-            }
+        .and_then(|nb| match nb.chars().filter(|&c| c == '.').count() {
+            0 => nb
+                .replace("_", "")
+                .parse::<i64>()
+                .map(|n| TokenType::IntLiteral(nb.clone(), n))
+                .map_err(|_| LexerError::InvalidNumber(nb, self.pos_in_line, self.line)),
+            1 => nb
+                .replace("_", "")
+                .parse::<f64>()
+                .map(|n| TokenType::FloatLiteral(nb.clone(), Float(n)))
+                .map_err(|_| LexerError::InvalidNumber(nb, self.pos_in_line, self.line)),
+            _ => Err(LexerError::InvalidNumber(nb, self.pos_in_line, self.line)),
         })
     }
 
@@ -296,7 +316,7 @@ mod tests {
                 line: 0,
             },
             Token {
-                typ: TokenType::NumberLiteral("5".to_string()),
+                typ: TokenType::IntLiteral("5".to_string(), 5),
                 start: 11,
                 end: 12,
                 line: 0,
@@ -308,7 +328,7 @@ mod tests {
                 line: 0,
             },
             Token {
-                typ: TokenType::NumberLiteral("10_11_2".to_string()),
+                typ: TokenType::IntLiteral("10_11_2".to_string(), 10112),
                 start: 13,
                 end: 20,
                 line: 0,
