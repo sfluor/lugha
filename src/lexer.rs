@@ -1,4 +1,4 @@
-use std::iter::Iterator;
+use std::{collections::HashSet, iter::Iterator};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Token {
@@ -84,6 +84,7 @@ struct Lexer {
     line: i32,
     pos: usize,
     buffer: Vec<char>,
+    keywords: HashSet<&'static str>,
 }
 
 fn valid_identifier_char(c: &char) -> bool {
@@ -100,6 +101,10 @@ impl Lexer {
             line: 0,
             pos: 0,
             buffer: Vec::new(),
+            // TODO: could be a static variable
+            keywords: HashSet::from_iter(vec![
+                "for", "while", "const", "var", "true", "false", "if", "else", "break", "func",
+            ]),
         }
     }
 
@@ -188,8 +193,13 @@ impl Lexer {
     }
 
     fn identifier(&mut self) -> Result<TokenType, LexerError> {
-        self.until(|c| !valid_identifier_char(c))
-            .map(TokenType::Identifier)
+        self.until(|c| !valid_identifier_char(c)).map(|content| {
+            if self.keywords.contains(&&content[..]) {
+                TokenType::Keyword(content)
+            } else {
+                TokenType::Identifier(content)
+            }
+        })
     }
 
     fn skip_newlines_and_whitespace(&mut self) {
@@ -249,14 +259,14 @@ mod tests {
     fn test_lex() -> Result<(), LexerError> {
         let lexer = Lexer::new(
             r#"const x: int = 5 + 10_11_2;
-    const y: string = "abc";
+    var y: string = "abc";
     x + y;"#
                 .to_string(),
         );
 
         let expected = vec![
             Token {
-                typ: TokenType::Identifier("const".to_string()),
+                typ: TokenType::Keyword("const".to_string()),
                 start: 0,
                 end: 5,
                 line: 0,
@@ -310,69 +320,69 @@ mod tests {
                 line: 0,
             },
             Token {
-                typ: TokenType::Identifier("const".to_string()),
+                typ: TokenType::Keyword("var".to_string()),
                 start: 21,
-                end: 26,
+                end: 24,
                 line: 1,
             },
             Token {
                 typ: TokenType::Identifier("y".to_string()),
-                start: 26,
-                end: 27,
+                start: 24,
+                end: 25,
                 line: 1,
             },
             Token {
                 typ: TokenType::Symbol(SymbolType::Colon),
-                start: 27,
-                end: 28,
+                start: 25,
+                end: 26,
                 line: 1,
             },
             Token {
                 typ: TokenType::Identifier("string".to_string()),
-                start: 28,
-                end: 34,
+                start: 26,
+                end: 32,
                 line: 1,
             },
             Token {
                 typ: TokenType::Symbol(SymbolType::Eq),
-                start: 34,
-                end: 35,
+                start: 32,
+                end: 33,
                 line: 1,
             },
             Token {
                 typ: TokenType::StringLiteral("abc".to_string()),
-                start: 35,
-                end: 40,
+                start: 33,
+                end: 38,
                 line: 1,
             },
             Token {
                 typ: TokenType::Symbol(SymbolType::SemiColon),
-                start: 40,
-                end: 41,
+                start: 38,
+                end: 39,
                 line: 1,
             },
             Token {
                 typ: TokenType::Identifier("x".to_string()),
+                start: 39,
+                end: 40,
+                line: 2,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::Plus),
+                start: 40,
+                end: 41,
+                line: 2,
+            },
+            Token {
+                typ: TokenType::Identifier("y".to_string()),
                 start: 41,
                 end: 42,
                 line: 2,
             },
             Token {
-                typ: TokenType::Symbol(SymbolType::Plus),
+                typ: TokenType::Symbol(SymbolType::SemiColon),
                 start: 42,
                 end: 43,
-                line: 2,
-            },
-            Token {
-                typ: TokenType::Identifier("y".to_string()),
-                start: 43,
-                end: 44,
-                line: 2,
-            },
-            Token {
-                typ: TokenType::Symbol(SymbolType::SemiColon),
-                start: 44,
-                end: 45,
                 line: 2,
             },
         ];
