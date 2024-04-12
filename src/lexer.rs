@@ -51,7 +51,7 @@ impl SymbolType {
 }
 
 #[derive(Clone, Debug)]
-pub struct Float(f64);
+pub struct Float(pub f64);
 
 impl PartialEq for Float {
     fn eq(&self, other: &Self) -> bool {
@@ -118,7 +118,7 @@ impl TokenType {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LexerError {
     Generic(&'static str),
     UnexpectedChar(char, usize, i32),
@@ -143,7 +143,7 @@ fn valid_identifier_char(c: &char) -> bool {
 }
 
 impl Lexer {
-    pub fn new(inp: String) -> Lexer {
+    pub fn new(inp: &str) -> Lexer {
         Lexer {
             in_decimal: false,
             chars: inp.chars().into_iter().collect(),
@@ -181,8 +181,8 @@ impl Lexer {
 
     fn symbol(&mut self, single: bool) -> Result<TokenType, LexerError> {
         let Some(ch) = self.chars.get(self.pos) else {
-               unreachable!() // We already checked the character before this shouldn't happen
-           };
+            unreachable!() // We already checked the character before this shouldn't happen
+        };
 
         let sym = if single {
             match ch {
@@ -212,6 +212,10 @@ impl Lexer {
                 '>' => match self.peek() {
                     Some('=') => SymbolType::GTEQ,
                     _ => SymbolType::GT,
+                },
+                '<' => match self.peek() {
+                    Some('=') => SymbolType::LTEQ,
+                    _ => SymbolType::LT,
                 },
                 '!' => match self.peek() {
                     Some('=') => SymbolType::BangEq,
@@ -294,8 +298,8 @@ impl Iterator for Lexer {
         self.skip_newlines_and_whitespace();
 
         let Some(ch) = self.chars.get(self.pos) else {
-                return None;
-            };
+            return None;
+        };
 
         let ttype = Some(match ch {
             '+' | '-' | '*' | '/' | ':' | ';' | '(' | ')' => self.symbol(true),
@@ -331,8 +335,7 @@ mod tests {
         let lexer = Lexer::new(
             r#"const x: int = 5 + 10_11_2;
     var y: string = "abc";
-    x + y;"#
-                .to_string(),
+    x + y;"#,
         );
 
         let expected = vec![
@@ -470,7 +473,7 @@ mod tests {
         let inputs = vec!["0.9.1", "00.11.22", "44......"];
 
         for input in inputs {
-            let mut lexer = Lexer::new(input.to_string());
+            let mut lexer = Lexer::new(input);
             assert_eq!(
                 lexer.next(),
                 Some(Err(LexerError::InvalidNumber(input.to_string(), 0, 0)))
