@@ -1,15 +1,17 @@
 use std::{collections::HashSet, iter::Iterator, num::ParseIntError};
 
-#[derive(Debug, PartialEq, Eq)]
-struct Token {
-    typ: TokenType,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Token {
+    pub typ: TokenType,
     start: usize,
     end: usize,
     line: i32,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum SymbolType {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SymbolType {
+    Lparen,
+    Rparen,
     Plus,
     Minus,
     Star,
@@ -32,6 +34,8 @@ impl SymbolType {
         match self {
             SymbolType::Plus
             | SymbolType::Minus
+            | SymbolType::Lparen
+            | SymbolType::Rparen
             | SymbolType::Star
             | SymbolType::Slash
             | SymbolType::Percentage
@@ -46,7 +50,7 @@ impl SymbolType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Float(f64);
 
 impl PartialEq for Float {
@@ -58,8 +62,8 @@ impl PartialEq for Float {
 
 impl Eq for Float {}
 
-#[derive(Debug, PartialEq, Eq)]
-enum TokenType {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TokenType {
     Keyword(String),
     Identifier(String),
     StringLiteral(String),
@@ -79,10 +83,43 @@ impl TokenType {
             TokenType::Symbol(s) => s.len(),
         }
     }
+
+    pub fn precedence(&self, unary: bool) -> u8 {
+        match self {
+            TokenType::IntLiteral(_, _)
+            | TokenType::Identifier(_)
+            | TokenType::StringLiteral(_)
+            | TokenType::FloatLiteral(_, _) => 0,
+            TokenType::Keyword(keyword) => match keyword.as_ref() {
+                "or" => 2,
+                "and" => 3,
+                _ => 0,
+            },
+            TokenType::Symbol(symbol) => match symbol {
+                SymbolType::Lparen | SymbolType::Rparen => 0,
+                SymbolType::Eq => 1,
+                SymbolType::EqEq | SymbolType::BangEq => 4,
+                SymbolType::GT | SymbolType::GTEQ | SymbolType::LT | SymbolType::LTEQ => 5,
+                SymbolType::Plus => 6,
+                SymbolType::Minus => {
+                    if unary {
+                        8
+                    } else {
+                        6
+                    }
+                }
+                SymbolType::Star | SymbolType::Slash => 7,
+                SymbolType::Bang => 8,
+                SymbolType::SemiColon => panic!("Unexpected semicolon"),
+                SymbolType::Percentage => todo!(),
+                SymbolType::Colon => todo!(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum LexerError {
+pub enum LexerError {
     Generic(&'static str),
     UnexpectedChar(char, usize, i32),
     InvalidNumber(String, usize, i32),
@@ -90,14 +127,13 @@ enum LexerError {
     UnknownMultiSymbol(char, usize, i32),
 }
 
-struct Lexer {
+pub struct Lexer {
     // TODO: flux of chars instead of raw string
     in_decimal: bool,
     chars: Vec<char>,
     pos_in_line: usize,
     line: i32,
     pos: usize,
-    buffer: Vec<char>,
     keywords: HashSet<&'static str>,
 }
 
@@ -114,12 +150,17 @@ impl Lexer {
             pos_in_line: 0,
             line: 0,
             pos: 0,
-            buffer: Vec::new(),
             // TODO: could be a static variable
             keywords: HashSet::from_iter(vec![
                 "for", "while", "const", "var", "true", "false", "if", "else", "break", "func",
             ]),
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.pos_in_line = 0;
+        self.pos = 0;
+        self.line = 0;
     }
 
     fn until<F>(&mut self, cond: F) -> Result<String, LexerError>
@@ -152,6 +193,8 @@ impl Lexer {
                 ':' => SymbolType::Colon,
                 ';' => SymbolType::SemiColon,
                 '%' => SymbolType::Percentage,
+                '(' => SymbolType::Lparen,
+                ')' => SymbolType::Rparen,
                 _ => {
                     return Err(LexerError::UnknownSingleSymbol(
                         *ch,
@@ -165,6 +208,14 @@ impl Lexer {
                 '=' => match self.peek() {
                     Some('=') => SymbolType::EqEq,
                     _ => SymbolType::Eq,
+                },
+                '>' => match self.peek() {
+                    Some('=') => SymbolType::GTEQ,
+                    _ => SymbolType::GT,
+                },
+                '!' => match self.peek() {
+                    Some('=') => SymbolType::BangEq,
+                    _ => SymbolType::Bang,
                 },
                 _ => {
                     return Err(LexerError::UnknownMultiSymbol(
@@ -247,7 +298,7 @@ impl Iterator for Lexer {
             };
 
         let ttype = Some(match ch {
-            '+' | '-' | '*' | '/' | ':' | ';' => self.symbol(true),
+            '+' | '-' | '*' | '/' | ':' | ';' | '(' | ')' => self.symbol(true),
             '=' | '!' | '>' | '<' => self.symbol(false),
             'A'..='Z' | 'a'..='z' => self.identifier(),
             '"' => self.string(),
