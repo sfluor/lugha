@@ -44,9 +44,10 @@ enum Expr {
     Unary(UnaOp, BExpr),
     Literal(Value),
     Reference(String),
+    Assign { identifier: String, expr: BExpr },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AssignType {
     CreateConst,
     CreateVar,
@@ -64,10 +65,17 @@ enum Statement {
 }
 
 impl Statement {
-    fn eval(&self, scope: &mut Scope) -> Option<EvalError> {
+    fn eval(self, scope: &mut Scope) -> Result<(), EvalError> {
         match self {
-            Statement::Expr(expr) => expr.eval(scope).err(),
-            _ => todo!(),
+            Statement::Expr(expr) => expr.eval(scope).map(|_| ()),
+            Statement::Assign {
+                identifier,
+                expr,
+                typ,
+            } => {
+                let val = expr.eval(scope)?;
+                scope.set(identifier, val, typ == AssignType::CreateConst)
+            }
         }
     }
 
@@ -142,15 +150,26 @@ impl Expr {
                 Value::Bool(_) => Type::Boolean,
             }),
             Expr::Reference(ident) => scope.get(ident),
+            Expr::Assign { identifier, expr } => expr.type_check(scope),
         }
     }
 
-    fn eval(&self, scope: &mut Scope) -> Result<Value, EvalError> {
+    fn eval(self, scope: &mut Scope) -> Result<Value, EvalError> {
         match self {
-            Expr::Binary(left, op, right) => left.eval(scope)?.bin(op, &right.eval(scope)?),
-            Expr::Unary(op, node) => node.eval(scope)?.unary(op),
+            Expr::Binary(left, op, right) => left.eval(scope)?.bin(&op, &right.eval(scope)?),
+            Expr::Unary(op, node) => node.eval(scope)?.unary(&op),
             Expr::Literal(value) => Ok(value.clone()),
-            Expr::Reference(_) => todo!(),
+            Expr::Reference(ident) => match scope.get(&ident) {
+                // TODO: don't clone
+                Some(val) => Ok(val.clone()),
+                None => Err(EvalError::UnknownVariableReference(ident.to_string())),
+            },
+            Expr::Assign { identifier, expr } => {
+                let val = expr.eval(scope)?;
+                // TODO: no clone
+                scope.set(identifier, val.clone(), false)?;
+                Ok(val)
+            }
         }
     }
 }
@@ -238,6 +257,7 @@ enum ParserError {
     UnterminatedGrouping(Token),
     DuplicateVariableType(String, Type, Type),
     UnknownVariable(String),
+    InvalidAssignment(Expr),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -245,6 +265,8 @@ enum EvalError {
     BinTypeMismatch(Value, Value),
     UnimplementedBinaryOperator(Value, BinOp),
     UnimplementedUnaryOperator(Value, UnaOp),
+    UnknownVariableReference(String),
+    OverridingConstant(String, Value),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -402,8 +424,8 @@ impl<'a> ParserScope<'a> {
 
 struct Scope<'a> {
     parent: Option<Box<&'a Scope<'a>>>,
-    locals: HashMap<&'a str, Value>,
-    constants: HashSet<&'a str>,
+    locals: HashMap<String, Value>,
+    constants: HashSet<String>,
 }
 
 impl<'a> Scope<'a> {
@@ -422,8 +444,18 @@ impl<'a> Scope<'a> {
         ch
     }
 
-    fn set(&mut self, name: &'a str, val: Value) {
-        self.locals.insert(name, val);
+    fn set(&mut self, name: String, val: Value, constant: bool) -> Result<(), EvalError> {
+        if self.constants.contains(name.as_str()) {
+            return Err(EvalError::OverridingConstant(name.to_string(), val));
+        }
+
+        if constant {
+            self.constants.insert(name.to_string());
+        }
+
+        self.locals.insert(name.to_string(), val);
+
+        Ok(())
     }
 
     // TODO: don't use hash map to index variables
@@ -497,6 +529,33 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_assignment(
+        &mut self,
+        identifier: String,
+        typ: AssignType,
+        token: Token,
+    ) -> Option<Result<Statement, ParserError>> {
+        if let Err(err) = self.consume(TokenType::Symbol(SymbolType::Eq)) {
+            return Some(Err(err));
+        }
+
+        let val = match self.parse_precedence(0) {
+            Some(res) => match res {
+                Ok(val) => val,
+                Err(err) => return Some(Err(err)),
+            },
+            None => {
+                return Some(Err(ParserError::UnterminatedAssignment(token)));
+            }
+        };
+
+        Some(Ok(Statement::Assign {
+            identifier,
+            expr: val,
+            typ: typ,
+        }))
+    }
+
     // Parses const x = ... / var x = ...
     fn parse_declaration(&mut self, constant: bool) -> Option<Result<Statement, ParserError>> {
         let token = self.consume(TokenType::Keyword(if constant {
@@ -526,29 +585,13 @@ impl<'a> Parser<'a> {
             },
         };
 
-        if let Err(err) = self.consume(TokenType::Symbol(SymbolType::Eq)) {
-            return Some(Err(err));
-        }
-
-        let val = match self.parse_precedence(0) {
-            Some(res) => match res {
-                Ok(val) => val,
-                Err(err) => return Some(Err(err)),
-            },
-            None => {
-                return Some(Err(ParserError::UnterminatedAssignment(token)));
-            }
+        let typ = if constant {
+            AssignType::CreateConst
+        } else {
+            AssignType::CreateVar
         };
 
-        Some(Ok(Statement::Assign {
-            identifier,
-            expr: val,
-            typ: if constant {
-                AssignType::CreateConst
-            } else {
-                AssignType::CreateVar
-            },
-        }))
+        self.parse_assignment(identifier, typ, token)
     }
 
     fn parse_statement(&mut self) -> Option<Result<Statement, ParserError>> {
@@ -621,26 +664,33 @@ impl<'a> Parser<'a> {
                 return Some(next_node_res);
             };
 
-            let op = match symbol {
-                SymbolType::Plus => BinOp::Add,
-                SymbolType::Minus => BinOp::Sub,
-                SymbolType::Slash => BinOp::Div,
-                SymbolType::Star => BinOp::Mult,
-                SymbolType::GTEQ => BinOp::GTEQ,
-                SymbolType::GT => BinOp::GT,
-                SymbolType::LT => BinOp::LT,
-                SymbolType::LTEQ => BinOp::LTEQ,
-                SymbolType::EqEq => BinOp::EQ,
-                SymbolType::BangEq => BinOp::NEQ,
+            node = match symbol {
+                SymbolType::Plus => BinOp::Add.of(node, next_node),
+                SymbolType::Minus => BinOp::Sub.of(node, next_node),
+                SymbolType::Slash => BinOp::Div.of(node, next_node),
+                SymbolType::Star => BinOp::Mult.of(node, next_node),
+                SymbolType::GTEQ => BinOp::GTEQ.of(node, next_node),
+                SymbolType::GT => BinOp::GT.of(node, next_node),
+                SymbolType::LT => BinOp::LT.of(node, next_node),
+                SymbolType::LTEQ => BinOp::LTEQ.of(node, next_node),
+                SymbolType::EqEq => BinOp::EQ.of(node, next_node),
+                SymbolType::BangEq => BinOp::NEQ.of(node, next_node),
+                SymbolType::Eq => {
+                    let Expr::Reference(name) = node else {
+                        return Some(Err(ParserError::InvalidAssignment(node)));
+                    };
+
+                    Expr::Assign {
+                        identifier: name,
+                        expr: Box::new(next_node),
+                    }
+                }
                 SymbolType::Bang => todo!(),
-                SymbolType::Eq => todo!(),
                 SymbolType::Percentage => todo!(),
                 SymbolType::Colon => todo!(),
                 SymbolType::SemiColon => todo!(),
                 SymbolType::Rparen | SymbolType::Lparen => todo!(),
             };
-
-            node = op.of(node, next_node)
         }
 
         Some(Ok(node))
@@ -689,8 +739,6 @@ impl<'a> Parser<'a> {
 }
 
 mod test {
-    use core::panic;
-
     use super::*;
 
     #[test]
@@ -722,12 +770,13 @@ mod test {
                 .expect("no error");
 
             let mut scope = Scope::new();
+            let val = node.eval(&mut scope);
             assert_eq!(
-                node.eval(&mut scope),
+                val,
                 Ok(Value::Bool(true)),
                 "Evaluating {}, got {:?}",
                 expr,
-                node,
+                val,
             );
         }
     }
@@ -755,23 +804,28 @@ mod test {
                 .expect("no error");
 
             let mut scope = Scope::new();
+            let val = node.eval(&mut scope);
             assert_eq!(
-                node.eval(&mut scope),
+                val,
                 Ok(Value::Bool(false)),
                 "Evaluating {}, got {:?}",
                 expr,
-                node,
+                val,
             );
         }
     }
 
     #[test]
     fn test_statements() -> Result<(), ParserError> {
-        let mut parser = Parser::from_str(
+        let parser = Parser::from_str(
             r#"5 + 3 * -1;
             const x =  5.1;
+            var y = "z";
             10 / 2;
             "ab" + "cd";
+            x + 2.0;
+            const z = y = y + "a";
+            z;
             1 == 6;"#,
         );
 
@@ -790,6 +844,11 @@ mod test {
                 expr: Value::Float(Float(5.1)).ex(),
                 typ: AssignType::CreateConst,
             },
+            Statement::Assign {
+                identifier: "y".to_string(),
+                expr: Value::String("z".to_string()).ex(),
+                typ: AssignType::CreateVar,
+            },
             BinOp::Div
                 .of(Value::Integer(10).ex(), Value::Integer(2).ex())
                 .statement(),
@@ -799,6 +858,24 @@ mod test {
                     Value::String("cd".to_string()).ex(),
                 )
                 .statement(),
+            BinOp::Add
+                .of(
+                    Expr::Reference("x".to_string()),
+                    Value::Float(Float(2.0)).ex(),
+                )
+                .statement(),
+            Statement::Assign {
+                identifier: "z".to_string(),
+                expr: Expr::Assign {
+                    identifier: "y".to_string(),
+                    expr: Box::new(BinOp::Add.of(
+                        Expr::Reference("y".to_string()),
+                        Value::String("a".to_string()).ex(),
+                    )),
+                },
+                typ: AssignType::CreateConst,
+            },
+            Expr::Reference("z".to_string()).statement(),
             BinOp::EQ
                 .of(Value::Integer(1).ex(), Value::Integer(6).ex())
                 .statement(),
@@ -806,8 +883,12 @@ mod test {
         let expected_evals = vec![
             Some(Value::Integer(2)),
             None,
+            None,
             Some(Value::Integer(5)),
             Some(Value::String("abcd".to_string())),
+            Some(Value::Float(Float(7.1))),
+            None,
+            Some(Value::String("za".to_string())),
             Some(Value::Bool(false)),
         ];
         let statements: Vec<Result<Statement, ParserError>> = parser.collect();
@@ -815,37 +896,40 @@ mod test {
         assert_eq!(expected_nodes.len(), statements.len());
         assert_eq!(expected_evals.len(), statements.len());
 
+        let mut scope = Scope::new();
         for ((rstatement, expected), expected_val) in statements
             .into_iter()
             .zip(expected_nodes.into_iter())
             .zip(expected_evals.into_iter())
         {
             let statement = rstatement?;
-            let mut scope = Scope::new();
             assert_eq!(
                 statement, expected,
                 "Expected {:?} to be {:?}",
                 statement, expected
             );
 
-            let evaluated = match &statement {
+            let repr = format!("{:?}", statement);
+
+            let evaluated = match statement {
                 Statement::Expr(e) => match e.eval(&mut scope) {
                     Err(err) => {
                         panic!("Error: {:?}", err);
                     }
                     Ok(val) => Some(val),
                 },
-                Statement::Assign {
-                    identifier,
-                    expr,
-                    typ,
-                } => None,
+                _ => match statement.eval(&mut scope) {
+                    Err(err) => {
+                        panic!("Assignment error: {:?}", err);
+                    }
+                    Ok(_) => None,
+                },
             };
 
             assert_eq!(
                 evaluated, expected_val,
-                "Expected {:?} to eval to {:?}",
-                statement, expected_val,
+                "Expected {} to eval to {:?}",
+                repr, expected_val,
             );
         }
 
