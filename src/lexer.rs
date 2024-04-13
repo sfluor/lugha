@@ -1,4 +1,4 @@
-use std::{collections::HashSet, iter::Iterator, num::ParseIntError};
+use std::{collections::HashMap, iter::Iterator, num::ParseIntError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
@@ -6,6 +6,37 @@ pub struct Token {
     start: usize,
     end: usize,
     line: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeywordType {
+    And,
+    Break,
+    Const,
+    Else,
+    False,
+    For,
+    Func,
+    If,
+    Or,
+    Print,
+    True,
+    Var,
+    While,
+}
+impl KeywordType {
+    fn len(&self) -> usize {
+        match self {
+            KeywordType::If | KeywordType::Or => 2,
+            KeywordType::And | KeywordType::For | KeywordType::Var => 3,
+            KeywordType::Else | KeywordType::True | KeywordType::Func => 4,
+            KeywordType::Break
+            | KeywordType::False
+            | KeywordType::Const
+            | KeywordType::Print
+            | KeywordType::While => 5,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +95,7 @@ impl Eq for Float {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenType {
-    Keyword(String),
+    Keyword(KeywordType),
     Identifier(String),
     StringLiteral(String),
     IntLiteral(String, i64),
@@ -90,9 +121,9 @@ impl TokenType {
             | TokenType::Identifier(_)
             | TokenType::StringLiteral(_)
             | TokenType::FloatLiteral(_, _) => 0,
-            TokenType::Keyword(keyword) => match keyword.as_ref() {
-                "or" => 2,
-                "and" => 3,
+            TokenType::Keyword(keyword) => match keyword {
+                KeywordType::Or => 2,
+                KeywordType::And => 3,
                 _ => 0,
             },
             TokenType::Symbol(symbol) => match symbol {
@@ -133,7 +164,7 @@ pub struct Lexer {
     pos_in_line: usize,
     line: i32,
     pos: usize,
-    keywords: HashSet<&'static str>,
+    keywords: HashMap<&'static str, KeywordType>,
 }
 
 fn valid_identifier_char(c: &char) -> bool {
@@ -150,8 +181,17 @@ impl Lexer {
             line: 0,
             pos: 0,
             // TODO: could be a static variable
-            keywords: HashSet::from_iter(vec![
-                "for", "while", "const", "var", "true", "false", "if", "else", "break", "func",
+            keywords: HashMap::from_iter(vec![
+                ("for", KeywordType::For),
+                ("while", KeywordType::While),
+                ("const", KeywordType::Const),
+                ("var", KeywordType::Var),
+                ("true", KeywordType::True),
+                ("false", KeywordType::False),
+                ("if", KeywordType::If),
+                ("else", KeywordType::Else),
+                ("break", KeywordType::Break),
+                ("func", KeywordType::Func),
             ]),
         }
     }
@@ -268,10 +308,9 @@ impl Lexer {
 
     fn identifier(&mut self) -> Result<TokenType, LexerError> {
         self.until(|c| !valid_identifier_char(c)).map(|content| {
-            if self.keywords.contains(&&content[..]) {
-                TokenType::Keyword(content)
-            } else {
-                TokenType::Identifier(content)
+            match self.keywords.get(&&content[..]) {
+                Some(keyword) => TokenType::Keyword(keyword.clone()),
+                None => TokenType::Identifier(content),
             }
         })
     }
@@ -339,7 +378,7 @@ mod tests {
 
         let expected = vec![
             Token {
-                typ: TokenType::Keyword("const".to_string()),
+                typ: TokenType::Keyword(KeywordType::Const),
                 start: 0,
                 end: 5,
                 line: 0,
@@ -393,7 +432,7 @@ mod tests {
                 line: 0,
             },
             Token {
-                typ: TokenType::Keyword("var".to_string()),
+                typ: TokenType::Keyword(KeywordType::Var),
                 start: 21,
                 end: 24,
                 line: 1,

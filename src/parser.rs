@@ -1,4 +1,4 @@
-use crate::lexer::{Float, Lexer, LexerError, SymbolType, Token, TokenType};
+use crate::lexer::{Float, KeywordType, Lexer, LexerError, SymbolType, Token, TokenType};
 use std::iter::Peekable;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -362,9 +362,9 @@ impl Parser {
                 SymbolType::Lparen => self.grouping(token),
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
-            TokenType::Keyword(val) => match val.as_str() {
-                "false" => Ok(Expr::Literal(Value::Bool(false))),
-                "true" => Ok(Expr::Literal(Value::Bool(true))),
+            TokenType::Keyword(val) => match val {
+                KeywordType::False => Ok(Expr::Literal(Value::Bool(false))),
+                KeywordType::True => Ok(Expr::Literal(Value::Bool(true))),
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
             _ => Err(ParserError::InvalidPrefix(token)),
