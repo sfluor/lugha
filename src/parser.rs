@@ -35,7 +35,7 @@ impl UnaOp {
 
 type BExpr = Box<Expr>;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Expr {
     Binary(BExpr, BinOp, BExpr),
     Unary(UnaOp, BExpr),
@@ -53,11 +53,60 @@ impl Statement {
             Statement::Expr(expr) => expr.eval(scope).err(),
         }
     }
+
+    fn type_check(&self) -> Result<Type, ParserError> {
+        match self {
+            Statement::Expr(expr) => expr.type_check(),
+        }
+    }
 }
 
 impl Expr {
-    fn etype(&self) -> Type {
-        todo!()
+    fn type_check(&self) -> Result<Type, ParserError> {
+        match self {
+            Expr::Binary(left, op, right) => {
+                let ltype = left.type_check()?;
+                let rtype = right.type_check()?;
+
+                if ltype != rtype {
+                    return Err(ParserError::BinTypeError {
+                        left: ltype,
+                        right: rtype,
+                        expr: self.clone(),
+                    });
+                }
+
+                match op {
+                    BinOp::Add => {
+                        // TODO Avoid computing the type multiple times.
+                        Type::or3(Type::Integer, Type::Float, Type::String, left, ltype)?;
+
+                        Type::or3(Type::Integer, Type::Float, Type::String, right, rtype)
+                    }
+                    BinOp::Sub | BinOp::Mult | BinOp::Div => {
+                        // We only check left since we already checked that left and right were equal
+                        Type::or2(Type::Integer, Type::Float, left, ltype)
+                    }
+                    BinOp::GT | BinOp::LT | BinOp::GTEQ | BinOp::LTEQ | BinOp::EQ | BinOp::NEQ => {
+                        // As long as the two types are equal we're good.
+                        Ok(Type::Boolean)
+                    }
+                }
+            }
+            Expr::Unary(op, expr) => {
+                let typ = expr.type_check()?;
+                match op {
+                    UnaOp::Neg => Type::or2(Type::Integer, Type::Float, expr, typ),
+                    UnaOp::Not => Type::Boolean.is(expr, typ),
+                }
+            }
+            Expr::Literal(l) => Ok(match l {
+                Value::String(_) => Type::String,
+                Value::Float(_) => Type::Float,
+                Value::Integer(_) => Type::Integer,
+                Value::Bool(_) => Type::Boolean,
+            }),
+        }
     }
 
     fn eval(&self, scope: &mut Scope) -> Result<Value, EvalError> {
@@ -69,6 +118,7 @@ impl Expr {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Type {
     String,
     Float,
@@ -77,12 +127,72 @@ enum Type {
     // TODO: functions and custom types
 }
 
+impl Type {
+    // TODO: Could be a macro
+    fn or3(
+        typ1: Type,
+        typ2: Type,
+        typ3: Type,
+        expr: &Expr,
+        actual: Type,
+    ) -> Result<Type, ParserError> {
+        if actual != typ1 && actual != typ2 && actual != typ3 {
+            Err(ParserError::TypesError {
+                expected: vec![typ1, typ2, typ3],
+                actual,
+                expr: expr.clone(),
+            })
+        } else {
+            Ok(actual)
+        }
+    }
+
+    fn or2(typ1: Type, typ2: Type, expr: &Expr, actual: Type) -> Result<Type, ParserError> {
+        if actual != typ1 && actual != typ2 {
+            Err(ParserError::TypesError {
+                expected: vec![typ1, typ2],
+                actual,
+                expr: expr.clone(),
+            })
+        } else {
+            Ok(actual)
+        }
+    }
+
+    fn is(self, expr: &Expr, actual: Type) -> Result<Type, ParserError> {
+        if actual != self {
+            Err(ParserError::TypeError {
+                expected: self,
+                actual,
+                expr: expr.clone(),
+            })
+        } else {
+            Ok(actual)
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ParserError {
     Lexing(LexerError),
     ConsumeError {
         actual: Option<Token>,
         expected: TokenType,
+    },
+    TypesError {
+        expected: Vec<Type>,
+        actual: Type,
+        expr: Expr,
+    },
+    BinTypeError {
+        left: Type,
+        right: Type,
+        expr: Expr,
+    },
+    TypeError {
+        expected: Type,
+        actual: Type,
+        expr: Expr,
     },
     InvalidInfix(Token),
     InvalidPrefix(Token),
@@ -260,6 +370,13 @@ impl Parser {
     fn parse_statement(&mut self) -> Option<Result<Statement, ParserError>> {
         let result = self.parse_precedence(0).map(|r| r.map(Statement::Expr));
         self.consume(TokenType::Symbol(SymbolType::SemiColon));
+
+        if let Some(Ok(ref stmt)) = result {
+            if let Err(err) = stmt.type_check() {
+                return Some(Err(err));
+            }
+        }
+
         result
     }
 
@@ -450,14 +567,20 @@ mod test {
     #[test]
     fn test_statements() -> Result<(), ParserError> {
         let mut parser = Parser::from_str(
-            r#"5 + 3;
+            r#"5 + 3 * -1;
             10 / 2;
             "ab" + "cd";
             1 == 6;"#,
         );
 
         let expected_nodes = vec![
-            BinOp::Add.of(Value::Integer(5).ex(), Value::Integer(3).ex()),
+            BinOp::Add.of(
+                Value::Integer(5).ex(),
+                BinOp::Mult.of(
+                    Value::Integer(3).ex(),
+                    UnaOp::Neg.of(Value::Integer(1).ex()),
+                ),
+            ),
             BinOp::Div.of(Value::Integer(10).ex(), Value::Integer(2).ex()),
             BinOp::Add.of(
                 Value::String("ab".to_string()).ex(),
@@ -466,7 +589,7 @@ mod test {
             BinOp::EQ.of(Value::Integer(1).ex(), Value::Integer(6).ex()),
         ];
         let expected_evals = vec![
-            Value::Integer(8),
+            Value::Integer(2),
             Value::Integer(5),
             Value::String("abcd".to_string()),
             Value::Bool(false),
