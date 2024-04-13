@@ -1,5 +1,4 @@
 use crate::lexer::{Float, Lexer, LexerError, SymbolType, Token, TokenType};
-use core::panic;
 use std::iter::Peekable;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,8 +16,8 @@ enum BinOp {
 }
 
 impl BinOp {
-    fn of(self, left: Node, right: Node) -> Node {
-        Node::Binary(Box::new(left), self, Box::new(right))
+    fn of(self, left: Expr, right: Expr) -> Expr {
+        Expr::Binary(Box::new(left), self, Box::new(right))
     }
 }
 
@@ -29,18 +28,45 @@ enum UnaOp {
 }
 
 impl UnaOp {
-    fn of(self, node: Node) -> Node {
-        Node::Unary(self, Box::new(node))
+    fn of(self, node: Expr) -> Expr {
+        Expr::Unary(self, Box::new(node))
     }
 }
 
-type BNode = Box<Node>;
+type BExpr = Box<Expr>;
 
 #[derive(Debug, PartialEq, Eq)]
-enum Node {
-    Binary(BNode, BinOp, BNode),
-    Unary(UnaOp, BNode),
+enum Expr {
+    Binary(BExpr, BinOp, BExpr),
+    Unary(UnaOp, BExpr),
     Literal(Value),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Statement {
+    Expr(Expr),
+}
+
+impl Statement {
+    fn eval(&self, scope: &mut Scope) -> Option<EvalError> {
+        match self {
+            Statement::Expr(expr) => expr.eval(scope).err(),
+        }
+    }
+}
+
+impl Expr {
+    fn etype(&self) -> Type {
+        todo!()
+    }
+
+    fn eval(&self, scope: &mut Scope) -> Result<Value, EvalError> {
+        match self {
+            Expr::Binary(left, op, right) => left.eval(scope)?.bin(op, &right.eval(scope)?),
+            Expr::Unary(op, node) => node.eval(scope)?.unary(op),
+            Expr::Literal(value) => Ok(value.clone()),
+        }
+    }
 }
 
 enum Type {
@@ -80,6 +106,10 @@ enum Value {
 }
 
 impl Value {
+    pub fn ex(self) -> Expr {
+        Expr::Literal(self)
+    }
+
     pub fn unary(self, op: &UnaOp) -> Result<Value, EvalError> {
         match op {
             UnaOp::Neg => match self {
@@ -170,24 +200,13 @@ impl Value {
     }
 }
 
-trait Eval {
-    fn etype(&self) -> Type;
-    fn eval(&self, scope: &mut Scope) -> Result<Value, EvalError>;
-}
-
 struct Scope;
 
-impl Eval for Node {
-    fn etype(&self) -> Type {
-        todo!()
-    }
+impl Iterator for Parser {
+    type Item = Result<Statement, ParserError>;
 
-    fn eval(&self, scope: &mut Scope) -> Result<Value, EvalError> {
-        match self {
-            Node::Binary(left, op, right) => left.eval(scope)?.bin(op, &right.eval(scope)?),
-            Node::Unary(op, node) => node.eval(scope)?.unary(op),
-            Node::Literal(value) => Ok(value.clone()),
-        }
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+        self.parse_statement()
     }
 }
 
@@ -238,7 +257,13 @@ impl Parser {
         }
     }
 
-    fn parse_precedence(&mut self, precedence: u8) -> Option<Result<Node, ParserError>> {
+    fn parse_statement(&mut self) -> Option<Result<Statement, ParserError>> {
+        let result = self.parse_precedence(0).map(|r| r.map(Statement::Expr));
+        self.consume(TokenType::Symbol(SymbolType::SemiColon));
+        result
+    }
+
+    fn parse_precedence(&mut self, precedence: u8) -> Option<Result<Expr, ParserError>> {
         let Some(res) = self.lexer.next() else {
             return None;
         };
@@ -275,7 +300,7 @@ impl Parser {
                 return Some(Err(ParserError::InvalidInfix(next_token)));
             };
 
-            let next_node_res: Result<Node, ParserError> =
+            let next_node_res: Result<Expr, ParserError> =
                 self.parse_precedence(next_precedence)?;
             let Ok(next_node) = next_node_res else {
                 return Some(next_node_res);
@@ -306,7 +331,7 @@ impl Parser {
         Some(Ok(node))
     }
 
-    fn unary(&mut self, token: Token, op: UnaOp) -> Result<Node, ParserError> {
+    fn unary(&mut self, token: Token, op: UnaOp) -> Result<Expr, ParserError> {
         let Some(result) = self.parse_precedence(token.typ.precedence(true)) else {
             return Err(ParserError::UnterminatedUnary(token.clone()));
         };
@@ -314,7 +339,7 @@ impl Parser {
         result.map(|n| op.of(n))
     }
 
-    fn grouping(&mut self, token: Token) -> Result<Node, ParserError> {
+    fn grouping(&mut self, token: Token) -> Result<Expr, ParserError> {
         let Some(result) = self.parse_precedence(token.typ.precedence(false)) else {
             return Err(ParserError::UnterminatedGrouping(token.clone()));
         };
@@ -326,11 +351,11 @@ impl Parser {
         result
     }
 
-    fn parse_prefix(&mut self, token: Token) -> Result<Node, ParserError> {
+    fn parse_prefix(&mut self, token: Token) -> Result<Expr, ParserError> {
         match &token.typ {
-            TokenType::IntLiteral(_, val) => Ok(Node::Literal(Value::Integer(*val))),
-            TokenType::FloatLiteral(_, Float(f)) => Ok(Node::Literal(Value::Float(Float(*f)))),
-            TokenType::StringLiteral(val) => Ok(Node::Literal(Value::String(val.clone()))),
+            TokenType::IntLiteral(_, val) => Ok(Expr::Literal(Value::Integer(*val))),
+            TokenType::FloatLiteral(_, Float(f)) => Ok(Expr::Literal(Value::Float(Float(*f)))),
+            TokenType::StringLiteral(val) => Ok(Expr::Literal(Value::String(val.clone()))),
             TokenType::Symbol(symbol) => match symbol {
                 SymbolType::Bang => self.unary(token, UnaOp::Not),
                 SymbolType::Minus => self.unary(token, UnaOp::Neg),
@@ -338,8 +363,8 @@ impl Parser {
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
             TokenType::Keyword(val) => match val.as_str() {
-                "false" => Ok(Node::Literal(Value::Bool(false))),
-                "true" => Ok(Node::Literal(Value::Bool(true))),
+                "false" => Ok(Expr::Literal(Value::Bool(false))),
+                "true" => Ok(Expr::Literal(Value::Bool(true))),
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
             _ => Err(ParserError::InvalidPrefix(token)),
@@ -365,7 +390,11 @@ mod test {
             r#""a" != "ab""#,
             r#""a" != "b""#,
             r#""a" == "a""#,
+            r#""a" <= "b""#,
+            r#""a" < "b""#,
+            r#""zba" > "zb""#,
             r#""" == """#,
+            r#""abc" == "a" + "b" + "c""#,
         ];
 
         for expr in exprs {
@@ -419,6 +448,59 @@ mod test {
     }
 
     #[test]
+    fn test_statements() -> Result<(), ParserError> {
+        let mut parser = Parser::from_str(
+            r#"5 + 3;
+            10 / 2;
+            "ab" + "cd";
+            1 == 6;"#,
+        );
+
+        let expected_nodes = vec![
+            BinOp::Add.of(Value::Integer(5).ex(), Value::Integer(3).ex()),
+            BinOp::Div.of(Value::Integer(10).ex(), Value::Integer(2).ex()),
+            BinOp::Add.of(
+                Value::String("ab".to_string()).ex(),
+                Value::String("cd".to_string()).ex(),
+            ),
+            BinOp::EQ.of(Value::Integer(1).ex(), Value::Integer(6).ex()),
+        ];
+        let expected_evals = vec![
+            Value::Integer(8),
+            Value::Integer(5),
+            Value::String("abcd".to_string()),
+            Value::Bool(false),
+        ];
+        let statements: Vec<Result<Statement, ParserError>> = parser.collect();
+
+        assert_eq!(expected_nodes.len(), statements.len());
+        assert_eq!(expected_evals.len(), statements.len());
+
+        for ((rstatement, expected), expected_val) in statements
+            .into_iter()
+            .zip(expected_nodes.into_iter())
+            .zip(expected_evals.into_iter())
+        {
+            let Ok(Statement::Expr(node)) = rstatement else {
+                panic!("Unexpected statement: {:?}", rstatement);
+            };
+            let mut scope = Scope {};
+            assert_eq!(node, expected, "Expected {:?} to be {:?}", node, expected);
+            let expected_val = Ok(expected_val);
+
+            assert_eq!(
+                node.eval(&mut scope),
+                expected_val,
+                "Expected {:?} to eval to {:?}",
+                node,
+                expected_val,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_compare() {
         let mut parser = Parser::from_str("!(5 * 4 >= 2 + 1 / 6)");
 
@@ -429,16 +511,10 @@ mod test {
         assert_eq!(
             node,
             UnaOp::Not.of(BinOp::GTEQ.of(
-                BinOp::Mult.of(
-                    Node::Literal(Value::Integer(5)),
-                    Node::Literal(Value::Integer(4))
-                ),
+                BinOp::Mult.of(Value::Integer(5).ex(), Value::Integer(4).ex()),
                 BinOp::Add.of(
-                    Node::Literal(Value::Integer(2)),
-                    BinOp::Div.of(
-                        Node::Literal(Value::Integer(1)),
-                        Node::Literal(Value::Integer(6))
-                    )
+                    Value::Integer(2).ex(),
+                    BinOp::Div.of(Value::Integer(1).ex(), Value::Integer(6).ex())
                 )
             ))
         );
@@ -461,11 +537,8 @@ mod test {
         assert_eq!(
             node,
             BinOp::Add.of(
-                BinOp::Mult.of(
-                    Node::Literal(Value::Integer(5)),
-                    Node::Literal(Value::Integer(4))
-                ),
-                Node::Literal(Value::Integer(2))
+                BinOp::Mult.of(Value::Integer(5).ex(), Value::Integer(4).ex()),
+                Value::Integer(2).ex()
             )
         );
 

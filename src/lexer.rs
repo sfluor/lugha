@@ -96,7 +96,7 @@ impl TokenType {
                 _ => 0,
             },
             TokenType::Symbol(symbol) => match symbol {
-                SymbolType::Lparen | SymbolType::Rparen => 0,
+                SymbolType::SemiColon | SymbolType::Lparen | SymbolType::Rparen => 0,
                 SymbolType::Eq => 1,
                 SymbolType::EqEq | SymbolType::BangEq => 4,
                 SymbolType::GT | SymbolType::GTEQ | SymbolType::LT | SymbolType::LTEQ => 5,
@@ -110,7 +110,6 @@ impl TokenType {
                 }
                 SymbolType::Star | SymbolType::Slash => 7,
                 SymbolType::Bang => 8,
-                SymbolType::SemiColon => panic!("Unexpected semicolon"),
                 SymbolType::Percentage => todo!(),
                 SymbolType::Colon => todo!(),
             },
