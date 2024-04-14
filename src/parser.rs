@@ -18,6 +18,22 @@ enum BinOp {
     NEQ,
 }
 
+fn boolean(b: bool) -> Expr {
+    Value::Bool(b).ex()
+}
+
+fn int(x: i64) -> Expr {
+    Value::Integer(x).ex()
+}
+
+fn string(s: &str) -> Expr {
+    Value::String(s.to_string()).ex()
+}
+
+fn float(f: f64) -> Expr {
+    Value::Float(Float(f)).ex()
+}
+
 impl BinOp {
     fn of(self, left: Expr, right: Expr) -> Expr {
         Expr::Binary(Box::new(left), self, Box::new(right))
@@ -150,7 +166,10 @@ impl Expr {
                 Value::Bool(_) => Type::Boolean,
             }),
             Expr::Reference(ident) => scope.get(ident),
-            Expr::Assign { identifier, expr } => expr.type_check(scope),
+            Expr::Assign { identifier, expr } => {
+                scope.can_be_assigned(identifier, expr)?;
+                expr.type_check(scope)
+            }
         }
     }
 
@@ -258,6 +277,7 @@ enum ParserError {
     DuplicateVariableType(String, Type, Type),
     UnknownVariable(String),
     InvalidAssignment(Expr),
+    InvalidAssignmentToConst(String, Expr),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -401,7 +421,9 @@ impl<'a> ParserScope<'a> {
     fn mark(&mut self, name: String, typ: Type, constant: bool) -> Result<(), ParserError> {
         match self.var_types.insert(name.clone(), typ.clone()) {
             None => {
-                self.constants.insert(name);
+                if constant {
+                    self.constants.insert(name);
+                }
                 Ok(())
             }
             Some(val) => Err(ParserError::DuplicateVariableType(name, val, typ)),
@@ -419,6 +441,21 @@ impl<'a> ParserScope<'a> {
         };
 
         Err(ParserError::UnknownVariable(name.to_string()))
+    }
+
+    fn can_be_assigned(&self, identifier: &str, expr: &Expr) -> Result<(), ParserError> {
+        if self.constants.contains(identifier) {
+            return Err(ParserError::InvalidAssignmentToConst(
+                identifier.to_string(),
+                expr.clone(),
+            ));
+        }
+
+        if let Some(ref par) = self.parent {
+            return par.can_be_assigned(identifier, expr);
+        };
+
+        Ok(())
     }
 }
 
@@ -552,7 +589,7 @@ impl<'a> Parser<'a> {
         Some(Ok(Statement::Assign {
             identifier,
             expr: val,
-            typ: typ,
+            typ,
         }))
     }
 
@@ -782,6 +819,48 @@ mod test {
     }
 
     #[test]
+    fn should_fail_to_parse() {
+        let exprs = vec![
+            (
+                "5 < 1.0;",
+                ParserError::BinTypeError {
+                    left: Type::Integer,
+                    right: Type::Float,
+                    expr: BinOp::LT.of(int(5), float(1.0)),
+                },
+            ),
+            (
+                r#""a" + 1.0;"#,
+                ParserError::BinTypeError {
+                    left: Type::String,
+                    right: Type::Float,
+                    expr: BinOp::Add.of(string("a"), float(1.0)),
+                },
+            ),
+            (
+                r"const x = 10; x = 4;",
+                ParserError::InvalidAssignmentToConst("x".to_string(), int(4)),
+            ),
+        ];
+
+        for (expr, expected_err) in exprs {
+            let mut parser = Parser::from_str(expr);
+            let mut errored = false;
+            while let Some(res) = parser.next() {
+                match res {
+                    Err(err) => {
+                        assert_eq!(err, expected_err);
+                        errored = true;
+                    }
+                    Ok(_) => {}
+                }
+            }
+
+            assert!(errored, "expected error when parsing: {expr:?}")
+        }
+    }
+
+    #[test]
     fn should_be_false() {
         let exprs = vec![
             "5 < 4",
@@ -831,54 +910,33 @@ mod test {
 
         let expected_nodes = vec![
             BinOp::Add
-                .of(
-                    Value::Integer(5).ex(),
-                    BinOp::Mult.of(
-                        Value::Integer(3).ex(),
-                        UnaOp::Neg.of(Value::Integer(1).ex()),
-                    ),
-                )
+                .of(int(5), BinOp::Mult.of(int(3), UnaOp::Neg.of(int(1))))
                 .statement(),
             Statement::Assign {
                 identifier: "x".to_string(),
-                expr: Value::Float(Float(5.1)).ex(),
+                expr: float(5.1),
                 typ: AssignType::CreateConst,
             },
             Statement::Assign {
                 identifier: "y".to_string(),
-                expr: Value::String("z".to_string()).ex(),
+                expr: string("z"),
                 typ: AssignType::CreateVar,
             },
-            BinOp::Div
-                .of(Value::Integer(10).ex(), Value::Integer(2).ex())
-                .statement(),
+            BinOp::Div.of(int(10), int(2)).statement(),
+            BinOp::Add.of(string("ab"), string("cd")).statement(),
             BinOp::Add
-                .of(
-                    Value::String("ab".to_string()).ex(),
-                    Value::String("cd".to_string()).ex(),
-                )
-                .statement(),
-            BinOp::Add
-                .of(
-                    Expr::Reference("x".to_string()),
-                    Value::Float(Float(2.0)).ex(),
-                )
+                .of(Expr::Reference("x".to_string()), float(2.0))
                 .statement(),
             Statement::Assign {
                 identifier: "z".to_string(),
                 expr: Expr::Assign {
                     identifier: "y".to_string(),
-                    expr: Box::new(BinOp::Add.of(
-                        Expr::Reference("y".to_string()),
-                        Value::String("a".to_string()).ex(),
-                    )),
+                    expr: Box::new(BinOp::Add.of(Expr::Reference("y".to_string()), string("a"))),
                 },
                 typ: AssignType::CreateConst,
             },
             Expr::Reference("z".to_string()).statement(),
-            BinOp::EQ
-                .of(Value::Integer(1).ex(), Value::Integer(6).ex())
-                .statement(),
+            BinOp::EQ.of(int(1), int(6)).statement(),
         ];
         let expected_evals = vec![
             Some(Value::Integer(2)),
@@ -947,11 +1005,8 @@ mod test {
         assert_eq!(
             node,
             UnaOp::Not.of(BinOp::GTEQ.of(
-                BinOp::Mult.of(Value::Integer(5).ex(), Value::Integer(4).ex()),
-                BinOp::Add.of(
-                    Value::Integer(2).ex(),
-                    BinOp::Div.of(Value::Integer(1).ex(), Value::Integer(6).ex())
-                )
+                BinOp::Mult.of(int(5), int(4)),
+                BinOp::Add.of(int(2), BinOp::Div.of(int(1), int(6)))
             ))
         );
 
@@ -974,7 +1029,7 @@ mod test {
         let expected_stmts = vec![
             Statement::Assign {
                 identifier: "x".to_string(),
-                expr: Value::Integer(10).ex(),
+                expr: int(10),
                 typ: AssignType::CreateConst,
             },
             Statement::Assign {
@@ -984,10 +1039,7 @@ mod test {
             },
             Statement::Assign {
                 identifier: "z".to_string(),
-                expr: BinOp::Add.of(
-                    Value::String("a".to_string()).ex(),
-                    Value::String("b".to_string()).ex(),
-                ),
+                expr: BinOp::Add.of(string("a"), string("b")),
                 typ: AssignType::CreateConst,
             },
         ];
@@ -1012,13 +1064,7 @@ mod test {
             .parse_precedence(0)
             .expect("expected node")
             .expect("expected no error");
-        assert_eq!(
-            node,
-            BinOp::Add.of(
-                BinOp::Mult.of(Value::Integer(5).ex(), Value::Integer(4).ex()),
-                Value::Integer(2).ex()
-            )
-        );
+        assert_eq!(node, BinOp::Add.of(BinOp::Mult.of(int(5), int(4)), int(2)));
 
         let mut scope = Scope::new();
         assert_eq!(node.eval(&mut scope), Ok(Value::Integer(22)));
