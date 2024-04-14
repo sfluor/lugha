@@ -14,6 +14,7 @@ pub enum KeywordType {
     Break,
     Const,
     Else,
+    Elif,
     False,
     For,
     Func,
@@ -29,7 +30,7 @@ impl KeywordType {
         match self {
             KeywordType::If | KeywordType::Or => 2,
             KeywordType::And | KeywordType::For | KeywordType::Var => 3,
-            KeywordType::Else | KeywordType::True | KeywordType::Func => 4,
+            KeywordType::Elif | KeywordType::Else | KeywordType::True | KeywordType::Func => 4,
             KeywordType::Break
             | KeywordType::False
             | KeywordType::Const
@@ -43,6 +44,8 @@ impl KeywordType {
 pub enum SymbolType {
     Lparen,
     Rparen,
+    LBracket,
+    RBracket,
     Plus,
     Minus,
     Star,
@@ -65,6 +68,8 @@ impl SymbolType {
         match self {
             SymbolType::Plus
             | SymbolType::Minus
+            | SymbolType::LBracket
+            | SymbolType::RBracket
             | SymbolType::Lparen
             | SymbolType::Rparen
             | SymbolType::Star
@@ -127,7 +132,11 @@ impl TokenType {
                 _ => 0,
             },
             TokenType::Symbol(symbol) => match symbol {
-                SymbolType::SemiColon | SymbolType::Lparen | SymbolType::Rparen => 0,
+                SymbolType::SemiColon
+                | SymbolType::Lparen
+                | SymbolType::Rparen
+                | SymbolType::LBracket
+                | SymbolType::RBracket => 0,
                 SymbolType::Eq => 1,
                 SymbolType::EqEq | SymbolType::BangEq => 4,
                 SymbolType::GT | SymbolType::GTEQ | SymbolType::LT | SymbolType::LTEQ => 5,
@@ -165,6 +174,7 @@ pub struct Lexer {
     line: i32,
     pos: usize,
     keywords: HashMap<&'static str, KeywordType>,
+    error: bool,
 }
 
 fn valid_identifier_char(c: &char) -> bool {
@@ -176,6 +186,7 @@ impl Lexer {
     pub fn new(inp: &str) -> Lexer {
         Lexer {
             in_decimal: false,
+            error: false,
             chars: inp.chars().into_iter().collect(),
             pos_in_line: 0,
             line: 0,
@@ -190,6 +201,7 @@ impl Lexer {
                 ("false", KeywordType::False),
                 ("if", KeywordType::If),
                 ("else", KeywordType::Else),
+                ("elif", KeywordType::Elif),
                 ("break", KeywordType::Break),
                 ("func", KeywordType::Func),
             ]),
@@ -234,6 +246,8 @@ impl Lexer {
                 '%' => SymbolType::Percentage,
                 '(' => SymbolType::Lparen,
                 ')' => SymbolType::Rparen,
+                '{' => SymbolType::LBracket,
+                '}' => SymbolType::RBracket,
                 _ => {
                     return Err(LexerError::UnknownSingleSymbol(
                         *ch,
@@ -327,12 +341,8 @@ impl Lexer {
             }
         }
     }
-}
 
-impl Iterator for Lexer {
-    type Item = Result<Token, LexerError>;
-
-    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+    fn next_token(&mut self) -> Option<Result<Token, LexerError>> {
         self.skip_newlines_and_whitespace();
 
         let Some(ch) = self.chars.get(self.pos) else {
@@ -340,7 +350,7 @@ impl Iterator for Lexer {
         };
 
         let ttype = Some(match ch {
-            '+' | '-' | '*' | '/' | ':' | ';' | '(' | ')' => self.symbol(true),
+            '+' | '-' | '*' | '/' | ':' | ';' | '(' | ')' | '{' | '}' => self.symbol(true),
             '=' | '!' | '>' | '<' => self.symbol(false),
             'A'..='Z' | 'a'..='z' => self.identifier(),
             '"' => self.string(),
@@ -366,6 +376,18 @@ impl Iterator for Lexer {
     }
 }
 
+impl Iterator for Lexer {
+    type Item = Result<Token, LexerError>;
+
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+        if self.error {
+            None
+        } else {
+            self.next_token().inspect(|r| self.error = r.is_err())
+        }
+    }
+}
+
 mod tests {
     use super::*;
     #[test]
@@ -373,7 +395,18 @@ mod tests {
         let lexer = Lexer::new(
             r#"const x: int = 5 + 10_11_2;
     var y: string = "abc";
-    x + y;"#,
+    x + y;
+    if 5 > 3 {
+        if a > b {
+            1 + 2;
+            3 + 4;
+        } elif a > c {
+            4 + 7;
+            x = 1;
+        } else {
+            y = 2;
+        }
+    }"#,
         );
 
         let expected = vec![
@@ -497,11 +530,263 @@ mod tests {
                 end: 43,
                 line: 2,
             },
+            Token {
+                typ: TokenType::Keyword(KeywordType::If),
+                start: 43,
+                end: 45,
+                line: 3,
+            },
+            Token {
+                typ: TokenType::IntLiteral("5".to_owned(), 5),
+                start: 45,
+                end: 46,
+                line: 3,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::GT),
+                start: 46,
+                end: 47,
+                line: 3,
+            },
+            Token {
+                typ: TokenType::IntLiteral("3".to_owned(), 3),
+                start: 47,
+                end: 48,
+                line: 3,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::LBracket),
+                start: 48,
+                end: 49,
+                line: 3,
+            },
+            Token {
+                typ: TokenType::Keyword(KeywordType::If),
+                start: 49,
+                end: 51,
+                line: 4,
+            },
+            Token {
+                typ: TokenType::Identifier("a".to_owned()),
+                start: 51,
+                end: 52,
+                line: 4,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::GT),
+                start: 52,
+                end: 53,
+                line: 4,
+            },
+            Token {
+                typ: TokenType::Identifier("b".to_owned()),
+                start: 53,
+                end: 54,
+                line: 4,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::LBracket),
+                start: 54,
+                end: 55,
+                line: 4,
+            },
+            Token {
+                typ: TokenType::IntLiteral("1".to_owned(), 1),
+                start: 55,
+                end: 56,
+                line: 5,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::Plus),
+                start: 56,
+                end: 57,
+                line: 5,
+            },
+            Token {
+                typ: TokenType::IntLiteral("2".to_owned(), 2),
+                start: 57,
+                end: 58,
+                line: 5,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::SemiColon),
+                start: 58,
+                end: 59,
+                line: 5,
+            },
+            Token {
+                typ: TokenType::IntLiteral("3".to_owned(), 3),
+                start: 59,
+                end: 60,
+                line: 6,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::Plus),
+                start: 60,
+                end: 61,
+                line: 6,
+            },
+            Token {
+                typ: TokenType::IntLiteral("4".to_owned(), 4),
+                start: 61,
+                end: 62,
+                line: 6,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::SemiColon),
+                start: 62,
+                end: 63,
+                line: 6,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::RBracket),
+                start: 63,
+                end: 64,
+                line: 7,
+            },
+            Token {
+                typ: TokenType::Keyword(KeywordType::Elif),
+                start: 64,
+                end: 68,
+                line: 7,
+            },
+            Token {
+                typ: TokenType::Identifier("a".to_owned()),
+                start: 68,
+                end: 69,
+                line: 7,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::GT),
+                start: 69,
+                end: 70,
+                line: 7,
+            },
+            Token {
+                typ: TokenType::Identifier("c".to_owned()),
+                start: 70,
+                end: 71,
+                line: 7,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::LBracket),
+                start: 71,
+                end: 72,
+                line: 7,
+            },
+            Token {
+                typ: TokenType::IntLiteral("4".to_owned(), 4),
+                start: 72,
+                end: 73,
+                line: 8,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::Plus),
+                start: 73,
+                end: 74,
+                line: 8,
+            },
+            Token {
+                typ: TokenType::IntLiteral("7".to_owned(), 7),
+                start: 74,
+                end: 75,
+                line: 8,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::SemiColon),
+                start: 75,
+                end: 76,
+                line: 8,
+            },
+            Token {
+                typ: TokenType::Identifier("x".to_owned()),
+                start: 76,
+                end: 77,
+                line: 9,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::Eq),
+                start: 77,
+                end: 78,
+                line: 9,
+            },
+            Token {
+                typ: TokenType::IntLiteral("1".to_owned(), 1),
+                start: 78,
+                end: 79,
+                line: 9,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::SemiColon),
+                start: 79,
+                end: 80,
+                line: 9,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::RBracket),
+                start: 80,
+                end: 81,
+                line: 10,
+            },
+            Token {
+                typ: TokenType::Keyword(KeywordType::Else),
+                start: 81,
+                end: 85,
+                line: 10,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::LBracket),
+                start: 85,
+                end: 86,
+                line: 10,
+            },
+            Token {
+                typ: TokenType::Identifier("y".to_owned()),
+                start: 86,
+                end: 87,
+                line: 11,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::Eq),
+                start: 87,
+                end: 88,
+                line: 11,
+            },
+            Token {
+                typ: TokenType::IntLiteral("2".to_owned(), 2),
+                start: 88,
+                end: 89,
+                line: 11,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::SemiColon),
+                start: 89,
+                end: 90,
+                line: 11,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::RBracket),
+                start: 90,
+                end: 91,
+                line: 12,
+            },
+            Token {
+                typ: TokenType::Symbol(SymbolType::RBracket),
+                start: 91,
+                end: 92,
+                line: 13,
+            },
         ];
 
-        for (token, expected) in lexer.zip(expected.iter()) {
-            assert_eq!(token?, *expected);
+        let tokens: Vec<Result<Token, LexerError>> = lexer.collect();
+
+        for (i, expected) in expected.iter().enumerate() {
+            let token = tokens.get(i);
+            assert!(token.is_some());
+            assert_eq!(token.unwrap().to_owned()?, *expected);
         }
+
+        assert_eq!(tokens.len(), expected.len(), "got {tokens:?}");
 
         Ok(())
     }

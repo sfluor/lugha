@@ -18,6 +18,10 @@ enum BinOp {
     NEQ,
 }
 
+fn ident(name: &str) -> Expr {
+    Expr::Identifier(name.to_owned())
+}
+
 fn boolean(b: bool) -> Expr {
     Value::Bool(b).ex()
 }
@@ -59,7 +63,7 @@ enum Expr {
     Binary(BExpr, BinOp, BExpr),
     Unary(UnaOp, BExpr),
     Literal(Value),
-    Reference(String),
+    Identifier(String),
     Assign { identifier: String, expr: BExpr },
 }
 
@@ -78,6 +82,11 @@ enum Statement {
         expr: Expr,
         typ: AssignType,
     },
+    Conditional {
+        condition: Expr,
+        if_true: Vec<Statement>,
+        if_false: Vec<Statement>,
+    },
 }
 
 impl Statement {
@@ -91,6 +100,28 @@ impl Statement {
             } => {
                 let val = expr.eval(scope)?;
                 scope.set(identifier, val, typ == AssignType::CreateConst)
+            }
+            Statement::Conditional {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                let cond = condition.eval(scope)?;
+                match cond {
+                    Value::Bool(true) => {
+                        for s in if_true {
+                            s.eval(scope)?
+                        }
+                        Ok(())
+                    }
+                    Value::Bool(false) => {
+                        for s in if_false {
+                            s.eval(scope)?
+                        }
+                        Ok(())
+                    }
+                    _ => unreachable!("Unexpected non boolean condition: {cond:?}"),
+                }
             }
         }
     }
@@ -111,6 +142,28 @@ impl Statement {
                     *assignType == AssignType::CreateConst,
                 )?;
                 Ok(typ)
+            }
+            Statement::Conditional {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                let cond_type = condition.type_check(scope)?;
+                if cond_type != Type::Boolean {
+                    return Err(ParserError::InvalidConditionType(
+                        condition.clone(),
+                        cond_type,
+                    ));
+                }
+
+                for s in if_true {
+                    s.type_check(scope)?;
+                }
+                for s in if_false {
+                    s.type_check(scope)?;
+                }
+
+                Ok(Type::Statement)
             }
         }
     }
@@ -165,7 +218,7 @@ impl Expr {
                 Value::Integer(_) => Type::Integer,
                 Value::Bool(_) => Type::Boolean,
             }),
-            Expr::Reference(ident) => scope.get(ident),
+            Expr::Identifier(ident) => scope.get(ident),
             Expr::Assign { identifier, expr } => {
                 scope.can_be_assigned(identifier, expr)?;
                 expr.type_check(scope)
@@ -178,7 +231,7 @@ impl Expr {
             Expr::Binary(left, op, right) => left.eval(scope)?.bin(&op, &right.eval(scope)?),
             Expr::Unary(op, node) => node.eval(scope)?.unary(&op),
             Expr::Literal(value) => Ok(value.clone()),
-            Expr::Reference(ident) => match scope.get(&ident) {
+            Expr::Identifier(ident) => match scope.get(&ident) {
                 // TODO: don't clone
                 Some(val) => Ok(val.clone()),
                 None => Err(EvalError::UnknownVariableReference(ident.to_string())),
@@ -199,6 +252,8 @@ enum Type {
     Float,
     Integer,
     Boolean,
+    // Used for statement blocks that do not return anything.
+    Statement,
     // TODO: functions and custom types
 }
 
@@ -278,6 +333,7 @@ enum ParserError {
     UnknownVariable(String),
     InvalidAssignment(Expr),
     InvalidAssignmentToConst(String, Expr),
+    InvalidConditionType(Expr, Type),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -376,18 +432,23 @@ impl Value {
                     BinOp::Div => Value::Float(Float(left / right)),
                 });
             }
-            Value::Bool(left) => match op {
-                BinOp::Add | BinOp::Sub | BinOp::GT => todo!(),
-                BinOp::Sub => todo!(),
-                BinOp::Mult => todo!(),
-                BinOp::Div => todo!(),
-                BinOp::GT => todo!(),
-                BinOp::LT => todo!(),
-                BinOp::GTEQ => todo!(),
-                BinOp::LTEQ => todo!(),
-                BinOp::EQ => todo!(),
-                BinOp::NEQ => todo!(),
-            },
+            Value::Bool(left) => {
+                let Value::Bool(right) = other else {
+                    return Err(EvalError::BinTypeMismatch(self, other.clone()));
+                };
+
+                return Ok(match op {
+                    BinOp::GT => Value::Bool(left > *right),
+                    BinOp::LT => Value::Bool(left < *right),
+                    BinOp::GTEQ => Value::Bool(left >= *right),
+                    BinOp::LTEQ => Value::Bool(left <= *right),
+                    BinOp::EQ => Value::Bool(left == *right),
+                    BinOp::NEQ => Value::Bool(left != *right),
+                    BinOp::Mult => Value::Bool(left && *right),
+                    BinOp::Add => Value::Bool(left || *right),
+                    BinOp::Div | BinOp::Sub => unimplemented!(),
+                });
+            }
         }
     }
 }
@@ -513,11 +574,16 @@ impl<'a> Iterator for Parser<'a> {
     type Item = Result<Statement, ParserError>;
 
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
-        self.parse_statement()
+        if self.error {
+            None
+        } else {
+            self.parse_statement().inspect(|r| self.error = r.is_err())
+        }
     }
 }
 
 struct Parser<'a> {
+    error: bool,
     lexer: Peekable<Lexer>,
     scope: ParserScope<'a>,
 }
@@ -525,6 +591,7 @@ struct Parser<'a> {
 impl<'a> Parser<'a> {
     fn new(lexer: Lexer) -> Parser<'a> {
         Parser {
+            error: false,
             lexer: lexer.peekable(),
             scope: ParserScope::new(),
         }
@@ -576,7 +643,7 @@ impl<'a> Parser<'a> {
             return Some(Err(err));
         }
 
-        let val = match self.parse_precedence(0) {
+        let val = match self.parse_new_expr() {
             Some(res) => match res {
                 Ok(val) => val,
                 Err(err) => return Some(Err(err)),
@@ -632,6 +699,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Result<Statement, ParserError>> {
+        dbg!(self.lexer.peek());
+        let mut expect_colon = true;
         let result: Option<Result<Statement, ParserError>> = match self.lexer.peek() {
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Const) => {
                 self.parse_declaration(true)
@@ -639,14 +708,20 @@ impl<'a> Parser<'a> {
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Var) => {
                 self.parse_declaration(false)
             }
+            Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::If) => {
+                expect_colon = false;
+                self.parse_conditional()
+            }
             None => {
                 return None;
             }
-            _ => self.parse_precedence(0).map(|r| r.map(Statement::Expr)),
+            _ => self.parse_new_expr().map(|r| r.map(Statement::Expr)),
         };
 
-        if let Err(err) = self.consume(TokenType::Symbol(SymbolType::SemiColon)) {
-            return Some(Err(err));
+        if expect_colon {
+            if let Err(err) = self.consume(TokenType::Symbol(SymbolType::SemiColon)) {
+                return Some(Err(err));
+            }
         }
 
         if let Some(Ok(ref stmt)) = result {
@@ -713,7 +788,7 @@ impl<'a> Parser<'a> {
                 SymbolType::EqEq => BinOp::EQ.of(node, next_node),
                 SymbolType::BangEq => BinOp::NEQ.of(node, next_node),
                 SymbolType::Eq => {
-                    let Expr::Reference(name) = node else {
+                    let Expr::Identifier(name) = node else {
                         return Some(Err(ParserError::InvalidAssignment(node)));
                     };
 
@@ -726,7 +801,10 @@ impl<'a> Parser<'a> {
                 SymbolType::Percentage => todo!(),
                 SymbolType::Colon => todo!(),
                 SymbolType::SemiColon => todo!(),
-                SymbolType::Rparen | SymbolType::Lparen => todo!(),
+                SymbolType::RBracket
+                | SymbolType::LBracket
+                | SymbolType::Rparen
+                | SymbolType::Lparen => todo!(),
             };
         }
 
@@ -769,9 +847,53 @@ impl<'a> Parser<'a> {
                 KeywordType::True => Ok(Expr::Literal(Value::Bool(true))),
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
-            TokenType::Identifier(identifier) => Ok(Expr::Reference(identifier)),
-            _ => Err(ParserError::InvalidPrefix(token)),
+            TokenType::Identifier(identifier) => Ok(Expr::Identifier(identifier)),
         }
+    }
+
+    fn lex_until<C, F>(&mut self, cond: C, mut consumer: F) -> Result<(), ParserError>
+    where
+        C: Fn(&Token) -> bool,
+        F: FnMut(&mut Self) -> (),
+    {
+        loop {
+            let peeked = dbg!(self.lexer.peek());
+            match peeked {
+                Some(res) => match res {
+                    Ok(token) => {
+                        if cond(token) {
+                            consumer(self);
+                        }
+                    }
+                    Err(err) => return Err(ParserError::Lexing(err.clone())),
+                },
+                None => return Ok(()),
+            }
+        }
+    }
+
+    fn parse_conditional(&mut self) -> Option<Result<Statement, ParserError>> {
+        let if_token = self.consume(TokenType::Keyword(KeywordType::If));
+        if let Err(err) = if_token {
+            return Some(Err(err));
+        }
+
+        let cond = dbg!(self.parse_new_expr());
+        if let Err(err) = self.consume(TokenType::Symbol(SymbolType::LBracket)) {
+            return Some(Err(err));
+        }
+
+        let mut if_true = Vec::new();
+        self.lex_until(
+            |token| token.typ == TokenType::Symbol(SymbolType::RBracket),
+            |this| if_true.push(dbg!(this.parse_statement())),
+        );
+
+        todo!()
+    }
+
+    fn parse_new_expr(&mut self) -> Option<Result<Expr, ParserError>> {
+        self.parse_precedence(0)
     }
 }
 
@@ -785,6 +907,12 @@ mod test {
             "4 < 5",
             "5 >= 4",
             "4 <= 5",
+            "true > false",
+            "true >= false",
+            "true == true",
+            "true == !false",
+            "true * true",
+            "true + false",
             "4/8 <= 1",
             "-1 < 1",
             "-1.2 < 1.3",
@@ -801,8 +929,8 @@ mod test {
         ];
 
         for expr in exprs {
-            let mut node = Parser::from_str(expr)
-                .parse_precedence(0)
+            let node = Parser::from_str(expr)
+                .parse_new_expr()
                 .expect("expect node")
                 .expect("no error");
 
@@ -877,8 +1005,8 @@ mod test {
         ];
 
         for expr in exprs {
-            let mut node = Parser::from_str(expr)
-                .parse_precedence(0)
+            let node = Parser::from_str(expr)
+                .parse_new_expr()
                 .expect("expect node")
                 .expect("no error");
 
@@ -894,61 +1022,12 @@ mod test {
         }
     }
 
-    #[test]
-    fn test_statements() -> Result<(), ParserError> {
-        let parser = Parser::from_str(
-            r#"5 + 3 * -1;
-            const x =  5.1;
-            var y = "z";
-            10 / 2;
-            "ab" + "cd";
-            x + 2.0;
-            const z = y = y + "a";
-            z;
-            1 == 6;"#,
-        );
-
-        let expected_nodes = vec![
-            BinOp::Add
-                .of(int(5), BinOp::Mult.of(int(3), UnaOp::Neg.of(int(1))))
-                .statement(),
-            Statement::Assign {
-                identifier: "x".to_string(),
-                expr: float(5.1),
-                typ: AssignType::CreateConst,
-            },
-            Statement::Assign {
-                identifier: "y".to_string(),
-                expr: string("z"),
-                typ: AssignType::CreateVar,
-            },
-            BinOp::Div.of(int(10), int(2)).statement(),
-            BinOp::Add.of(string("ab"), string("cd")).statement(),
-            BinOp::Add
-                .of(Expr::Reference("x".to_string()), float(2.0))
-                .statement(),
-            Statement::Assign {
-                identifier: "z".to_string(),
-                expr: Expr::Assign {
-                    identifier: "y".to_string(),
-                    expr: Box::new(BinOp::Add.of(Expr::Reference("y".to_string()), string("a"))),
-                },
-                typ: AssignType::CreateConst,
-            },
-            Expr::Reference("z".to_string()).statement(),
-            BinOp::EQ.of(int(1), int(6)).statement(),
-        ];
-        let expected_evals = vec![
-            Some(Value::Integer(2)),
-            None,
-            None,
-            Some(Value::Integer(5)),
-            Some(Value::String("abcd".to_string())),
-            Some(Value::Float(Float(7.1))),
-            None,
-            Some(Value::String("za".to_string())),
-            Some(Value::Bool(false)),
-        ];
+    fn assert_statements(
+        code: &str,
+        expected_nodes: &[Statement],
+        expected_evals: &[Option<Value>],
+    ) -> Result<(), ParserError> {
+        let parser = Parser::from_str(code);
         let statements: Vec<Result<Statement, ParserError>> = parser.collect();
 
         assert_eq!(expected_nodes.len(), statements.len());
@@ -962,7 +1041,7 @@ mod test {
         {
             let statement = rstatement?;
             assert_eq!(
-                statement, expected,
+                statement, *expected,
                 "Expected {:?} to be {:?}",
                 statement, expected
             );
@@ -985,7 +1064,7 @@ mod test {
             };
 
             assert_eq!(
-                evaluated, expected_val,
+                evaluated, *expected_val,
                 "Expected {} to eval to {:?}",
                 repr, expected_val,
             );
@@ -995,11 +1074,96 @@ mod test {
     }
 
     #[test]
+    fn test_conditions() -> Result<(), ParserError> {
+        let code = r#"var x = 4.1;
+        if x > 1.0 {
+            x = x + 0.1;
+            x = 2.0 * x;
+        } elif {
+            x = 4.2;
+        } else {
+            if x <= 10.0 {
+                x = 1.1;
+            }
+        }
+        "#;
+        let expected_nodes: Vec<Statement> = vec![
+            Statement::Assign {
+                identifier: "x".to_string(),
+                expr: float(4.1),
+                typ: AssignType::CreateVar,
+            },
+            Statement::Conditional {
+                condition: BinOp::GT.of(ident("x"), float(1.0)),
+                if_true: vec![],
+                if_false: vec![],
+            },
+        ];
+        let expected_evals: Vec<Option<Value>> = vec![None, None];
+
+        assert_statements(code, &expected_nodes, &expected_evals)
+    }
+
+    #[test]
+    fn test_statements() -> Result<(), ParserError> {
+        let code = r#"5 + 3 * -1;
+            const x =  5.1;
+            var y = "z";
+            10 / 2;
+            "ab" + "cd";
+            x + 2.0;
+            const z = y = y + "a";
+            z;
+            1 == 6;"#;
+        let expected_nodes: Vec<Statement> = vec![
+            BinOp::Add
+                .of(int(5), BinOp::Mult.of(int(3), UnaOp::Neg.of(int(1))))
+                .statement(),
+            Statement::Assign {
+                identifier: "x".to_string(),
+                expr: float(5.1),
+                typ: AssignType::CreateConst,
+            },
+            Statement::Assign {
+                identifier: "y".to_string(),
+                expr: string("z"),
+                typ: AssignType::CreateVar,
+            },
+            BinOp::Div.of(int(10), int(2)).statement(),
+            BinOp::Add.of(string("ab"), string("cd")).statement(),
+            BinOp::Add.of(ident("x"), float(2.0)).statement(),
+            Statement::Assign {
+                identifier: "z".to_string(),
+                expr: Expr::Assign {
+                    identifier: "y".to_string(),
+                    expr: Box::new(BinOp::Add.of(ident("y"), string("a"))),
+                },
+                typ: AssignType::CreateConst,
+            },
+            ident("z").statement(),
+            BinOp::EQ.of(int(1), int(6)).statement(),
+        ];
+        let expected_evals: Vec<Option<Value>> = vec![
+            Some(Value::Integer(2)),
+            None,
+            None,
+            Some(Value::Integer(5)),
+            Some(Value::String("abcd".to_string())),
+            Some(Value::Float(Float(7.1))),
+            None,
+            Some(Value::String("za".to_string())),
+            Some(Value::Bool(false)),
+        ];
+
+        assert_statements(code, &expected_nodes, &expected_evals)
+    }
+
+    #[test]
     fn test_compare() {
         let mut parser = Parser::from_str("!(5 * 4 >= 2 + 1 / 6)");
 
         let node = parser
-            .parse_precedence(0)
+            .parse_new_expr()
             .expect("expected node")
             .expect("expected no error");
         assert_eq!(
@@ -1013,8 +1177,8 @@ mod test {
         let mut scope = Scope::new();
         assert_eq!(node.eval(&mut scope), Ok(Value::Bool(false)));
 
-        assert_eq!(parser.parse_precedence(0), None);
-        assert_eq!(parser.parse_precedence(0), None);
+        assert_eq!(parser.parse_new_expr(), None);
+        assert_eq!(parser.parse_new_expr(), None);
     }
 
     #[test]
@@ -1034,7 +1198,7 @@ mod test {
             },
             Statement::Assign {
                 identifier: "y".to_string(),
-                expr: Expr::Reference("x".to_string()),
+                expr: ident("x"),
                 typ: AssignType::CreateConst,
             },
             Statement::Assign {
@@ -1052,8 +1216,8 @@ mod test {
             assert_eq!(stmt, expected, "Expected {:?} to be {:?}", stmt, expected);
         }
 
-        assert_eq!(parser.parse_precedence(0), None);
-        assert_eq!(parser.parse_precedence(0), None);
+        assert_eq!(parser.parse_new_expr(), None);
+        assert_eq!(parser.parse_new_expr(), None);
     }
 
     #[test]
@@ -1061,7 +1225,7 @@ mod test {
         let mut parser = Parser::from_str("5 * 4 + 2");
 
         let node = parser
-            .parse_precedence(0)
+            .parse_new_expr()
             .expect("expected node")
             .expect("expected no error");
         assert_eq!(node, BinOp::Add.of(BinOp::Mult.of(int(5), int(4)), int(2)));
@@ -1069,8 +1233,8 @@ mod test {
         let mut scope = Scope::new();
         assert_eq!(node.eval(&mut scope), Ok(Value::Integer(22)));
 
-        assert_eq!(parser.parse_precedence(0), None);
-        assert_eq!(parser.parse_precedence(0), None);
+        assert_eq!(parser.parse_new_expr(), None);
+        assert_eq!(parser.parse_new_expr(), None);
     }
 }
 // TODO a*b = 5 should fail
