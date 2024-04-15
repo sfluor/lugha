@@ -40,7 +40,7 @@ fn float(f: f64) -> Expr {
 
 impl BinOp {
     fn of(self, left: Expr, right: Expr) -> Expr {
-        Expr::Binary(Box::new(left), self, Box::new(right))
+        Expr::Binary(left.b(), self, right.b())
     }
 }
 
@@ -52,7 +52,7 @@ enum UnaOp {
 
 impl UnaOp {
     fn of(self, node: Expr) -> Expr {
-        Expr::Unary(self, Box::new(node))
+        Expr::Unary(self, node.b())
     }
 }
 
@@ -71,7 +71,6 @@ enum Expr {
 enum AssignType {
     CreateConst,
     CreateVar,
-    Assign,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -83,9 +82,8 @@ enum Statement {
         typ: AssignType,
     },
     Conditional {
-        condition: Expr,
-        if_true: Vec<Statement>,
-        if_false: Vec<Statement>,
+        branches: Vec<(Expr, Vec<Statement>)>,
+        default: Vec<Statement>,
     },
 }
 
@@ -101,27 +99,21 @@ impl Statement {
                 let val = expr.eval(scope)?;
                 scope.set(identifier, val, typ == AssignType::CreateConst)
             }
-            Statement::Conditional {
-                condition,
-                if_true,
-                if_false,
-            } => {
-                let cond = condition.eval(scope)?;
-                match cond {
-                    Value::Bool(true) => {
-                        for s in if_true {
-                            s.eval(scope)?
+            Statement::Conditional { branches, default } => {
+                for (expr, branch) in branches {
+                    if let Value::Bool(true) = expr.eval(scope)? {
+                        for stmt in branch {
+                            stmt.eval(scope)?;
                         }
-                        Ok(())
-                    }
-                    Value::Bool(false) => {
-                        for s in if_false {
-                            s.eval(scope)?
-                        }
-                        Ok(())
-                    }
-                    _ => unreachable!("Unexpected non boolean condition: {cond:?}"),
+                        return Ok(());
+                    };
                 }
+
+                for stmt in default {
+                    stmt.eval(scope)?;
+                }
+
+                Ok(())
             }
         }
     }
@@ -133,34 +125,30 @@ impl Statement {
             Statement::Assign {
                 identifier,
                 expr,
-                typ: assignType,
+                typ: assign_type,
             } => {
                 let typ = expr.type_check(scope)?;
                 scope.mark(
                     identifier.clone(),
                     typ.clone(),
-                    *assignType == AssignType::CreateConst,
+                    *assign_type == AssignType::CreateConst,
                 )?;
                 Ok(typ)
             }
-            Statement::Conditional {
-                condition,
-                if_true,
-                if_false,
-            } => {
-                let cond_type = condition.type_check(scope)?;
-                if cond_type != Type::Boolean {
-                    return Err(ParserError::InvalidConditionType(
-                        condition.clone(),
-                        cond_type,
-                    ));
+            Statement::Conditional { branches, default } => {
+                for (cond, branch) in branches {
+                    let cond_type = cond.type_check(scope)?;
+                    if cond_type != Type::Boolean {
+                        return Err(ParserError::InvalidConditionType(cond.clone(), cond_type));
+                    }
+
+                    for stmt in branch {
+                        stmt.type_check(scope)?;
+                    }
                 }
 
-                for s in if_true {
-                    s.type_check(scope)?;
-                }
-                for s in if_false {
-                    s.type_check(scope)?;
+                for stmt in default {
+                    stmt.type_check(scope)?;
                 }
 
                 Ok(Type::Statement)
@@ -170,6 +158,10 @@ impl Statement {
 }
 
 impl Expr {
+    fn b(self) -> BExpr {
+        Box::new(self)
+    }
+
     fn statement(self) -> Statement {
         Statement::Expr(self)
     }
@@ -699,7 +691,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Result<Statement, ParserError>> {
-        dbg!(self.lexer.peek());
         let mut expect_colon = true;
         let result: Option<Result<Statement, ParserError>> = match self.lexer.peek() {
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Const) => {
@@ -794,7 +785,7 @@ impl<'a> Parser<'a> {
 
                     Expr::Assign {
                         identifier: name,
-                        expr: Box::new(next_node),
+                        expr: next_node.b(),
                     }
                 }
                 SymbolType::Bang => todo!(),
@@ -851,45 +842,121 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn lex_until<C, F>(&mut self, cond: C, mut consumer: F) -> Result<(), ParserError>
+    fn lex_until<C, F, T>(&mut self, cond: C, mut consumer: F) -> Result<Vec<T>, ParserError>
     where
         C: Fn(&Token) -> bool,
-        F: FnMut(&mut Self) -> (),
+        F: FnMut(&mut Self) -> Option<Result<T, ParserError>>,
     {
+        let mut acc = Vec::new();
         loop {
-            let peeked = dbg!(self.lexer.peek());
-            match peeked {
-                Some(res) => match res {
-                    Ok(token) => {
-                        if cond(token) {
-                            consumer(self);
-                        }
+            match self.lexer.peek() {
+                None => return Ok(acc),
+                Some(Err(err)) => return Err(ParserError::Lexing(err.clone())),
+                Some(Ok(token)) => {
+                    if cond(token) {
+                        return Ok(acc);
                     }
-                    Err(err) => return Err(ParserError::Lexing(err.clone())),
-                },
-                None => return Ok(()),
+
+                    if let Some(data) = consumer(self) {
+                        acc.push(data?);
+                    } else {
+                        return Ok(acc);
+                    }
+                }
             }
         }
     }
 
-    fn parse_conditional(&mut self) -> Option<Result<Statement, ParserError>> {
-        let if_token = self.consume(TokenType::Keyword(KeywordType::If));
-        if let Err(err) = if_token {
-            return Some(Err(err));
-        }
-
-        let cond = dbg!(self.parse_new_expr());
+    fn parse_block(&mut self) -> Option<Result<Vec<Statement>, ParserError>> {
         if let Err(err) = self.consume(TokenType::Symbol(SymbolType::LBracket)) {
             return Some(Err(err));
         }
 
-        let mut if_true = Vec::new();
-        self.lex_until(
+        let block = self.lex_until(
             |token| token.typ == TokenType::Symbol(SymbolType::RBracket),
-            |this| if_true.push(dbg!(this.parse_statement())),
+            |this| this.parse_statement(),
         );
+        if let Err(err) = block {
+            return Some(Err(err));
+        }
 
-        todo!()
+        if let Err(err) = self.consume(TokenType::Symbol(SymbolType::RBracket)) {
+            return Some(Err(err));
+        }
+        self.lexer.peek();
+
+        Some(Ok(block.unwrap()))
+    }
+
+    fn parse_condition_branch(
+        &mut self,
+        typ: KeywordType,
+    ) -> Option<Result<(Expr, Vec<Statement>), ParserError>> {
+        let Some(Ok(TokenType::Keyword(ktyp))) =
+            self.lexer.peek().map(|x| x.as_ref().map(|t| &t.typ))
+        else {
+            return None;
+        };
+
+        if typ != *ktyp {
+            return None;
+        }
+
+        if let Err(err) = self.consume(TokenType::Keyword(typ)) {
+            return Some(Err(err));
+        }
+
+        let cond = self.parse_new_expr()?;
+        if let Err(err) = cond {
+            return Some(Err(err));
+        }
+        let cond = cond.unwrap();
+        let if_true = self.parse_block()?;
+        if let Err(err) = if_true {
+            return Some(Err(err));
+        }
+
+        let tuple: (Expr, Vec<Statement>) = (cond, if_true.unwrap());
+
+        Some(Ok(tuple))
+    }
+
+    fn parse_conditional(&mut self) -> Option<Result<Statement, ParserError>> {
+        let mut branches = Vec::new();
+        let if_parse = self.parse_condition_branch(KeywordType::If)?;
+        let Ok((cond, statements)) = if_parse else {
+            return Some(Err(if_parse.unwrap_err()));
+        };
+        branches.push((cond, statements));
+
+        loop {
+            match self.parse_condition_branch(KeywordType::Elif) {
+                None => {
+                    break;
+                }
+                Some(Err(err)) => return Some(Err(err)),
+                Some(Ok(branch)) => branches.push(branch),
+            }
+        }
+
+        let mut default = Vec::new();
+        if let Some(Ok(TokenType::Keyword(KeywordType::Else))) =
+            self.lexer.peek().map(|x| x.as_ref().map(|t| &t.typ))
+        {
+            if let Err(err) = self.consume(TokenType::Keyword(KeywordType::Else)) {
+                return Some(Err(err));
+            }
+
+            match self.parse_block() {
+                None => (),
+                Some(Ok(r)) => default = r,
+                Some(Err(err)) => {
+                    return Some(Err(err));
+                }
+            }
+        };
+
+        Some(Ok(Statement::Conditional { branches, default }))
     }
 
     fn parse_new_expr(&mut self) -> Option<Result<Expr, ParserError>> {
@@ -1030,7 +1097,11 @@ mod test {
         let parser = Parser::from_str(code);
         let statements: Vec<Result<Statement, ParserError>> = parser.collect();
 
-        assert_eq!(expected_nodes.len(), statements.len());
+        assert_eq!(
+            expected_nodes.len(),
+            statements.len(),
+            "\nExpect: {expected_nodes:?}\n---\nActual:{statements:?}"
+        );
         assert_eq!(expected_evals.len(), statements.len());
 
         let mut scope = Scope::new();
@@ -1079,7 +1150,7 @@ mod test {
         if x > 1.0 {
             x = x + 0.1;
             x = 2.0 * x;
-        } elif {
+        } elif false {
             x = 4.2;
         } else {
             if x <= 10.0 {
@@ -1094,9 +1165,42 @@ mod test {
                 typ: AssignType::CreateVar,
             },
             Statement::Conditional {
-                condition: BinOp::GT.of(ident("x"), float(1.0)),
-                if_true: vec![],
-                if_false: vec![],
+                branches: vec![
+                    (
+                        BinOp::GT.of(ident("x"), float(1.0)),
+                        vec![
+                            Expr::Assign {
+                                identifier: "x".to_owned(),
+                                expr: BinOp::Add.of(ident("x"), float(0.1)).b(),
+                            }
+                            .statement(),
+                            Expr::Assign {
+                                identifier: "x".to_owned(),
+                                expr: BinOp::Mult.of(float(2.0), ident("x")).b(),
+                            }
+                            .statement(),
+                        ],
+                    ),
+                    (
+                        boolean(false),
+                        vec![Expr::Assign {
+                            identifier: "x".to_owned(),
+                            expr: float(4.2).b(),
+                        }
+                        .statement()],
+                    ),
+                ],
+                default: vec![Statement::Conditional {
+                    branches: vec![(
+                        BinOp::LTEQ.of(ident("x"), float(10.0)),
+                        vec![Expr::Assign {
+                            identifier: "x".to_owned(),
+                            expr: float(1.1).b(),
+                        }
+                        .statement()],
+                    )],
+                    default: vec![],
+                }],
             },
         ];
         let expected_evals: Vec<Option<Value>> = vec![None, None];
@@ -1136,7 +1240,7 @@ mod test {
                 identifier: "z".to_string(),
                 expr: Expr::Assign {
                     identifier: "y".to_string(),
-                    expr: Box::new(BinOp::Add.of(ident("y"), string("a"))),
+                    expr: BinOp::Add.of(ident("y"), string("a")).b(),
                 },
                 typ: AssignType::CreateConst,
             },
