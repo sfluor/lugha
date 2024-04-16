@@ -1,4 +1,7 @@
+use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
+use std::rc::Rc;
 
 use crate::lexer::Float;
 use crate::parser::*;
@@ -10,6 +13,7 @@ enum EvalError {
     UnimplementedUnaryOperator(Value, UnaOp),
     UnknownVariableReference(String),
     OverridingConstant(String, Value),
+    WriteError,
 }
 
 struct Variable {
@@ -18,14 +22,27 @@ struct Variable {
 }
 
 pub struct Scope<'a> {
+    writer: Rc<RefCell<dyn std::io::Write>>,
     parent: Option<Box<&'a Scope<'a>>>,
     locals: HashMap<String, Value>,
     constants: HashSet<String>,
 }
 
 impl<'a> Scope<'a> {
-    fn new() -> Scope<'a> {
+    fn new_stdout() -> Scope<'a> {
+        Self::new(Rc::new(RefCell::new(std::io::stdout())))
+    }
+
+    fn new_cursor() -> (Scope<'a>, Rc<RefCell<Cursor<Vec<u8>>>>) {
+        let mut cursor = Cursor::new(Vec::new());
+        let cell = Rc::new(RefCell::new(cursor));
+        let cloned = Rc::clone(&cell);
+        (Self::new(cell), cloned)
+    }
+
+    fn new(writer: Rc<RefCell<dyn std::io::Write>>) -> Scope<'a> {
         Scope {
+            writer,
             parent: None,
             locals: HashMap::new(),
             constants: HashSet::new(),
@@ -33,7 +50,7 @@ impl<'a> Scope<'a> {
     }
 
     fn child(&self) -> Scope {
-        let mut ch = Scope::new();
+        let mut ch = Scope::new(Rc::clone(&self.writer));
         ch.parent = Some(Box::new(self));
 
         ch
@@ -101,7 +118,7 @@ impl Value {
                     BinOp::LTEQ => Value::Bool(*left <= *right),
                     BinOp::EQ => Value::Bool(*left == *right),
                     BinOp::NEQ => Value::Bool(*left != *right),
-                    BinOp::Sub | BinOp::Mult | BinOp::Div => {
+                    BinOp::Sub | BinOp::Mult | BinOp::Div | BinOp::And | BinOp::Or => {
                         return Err(EvalError::UnimplementedBinaryOperator(self, op.clone()));
                     }
                 });
@@ -122,6 +139,9 @@ impl Value {
                     BinOp::Sub => Value::Integer(left - right),
                     BinOp::Mult => Value::Integer(left * right),
                     BinOp::Div => Value::Integer(left / right),
+                    BinOp::And | BinOp::Or => {
+                        return Err(EvalError::UnimplementedBinaryOperator(self, op.clone()));
+                    }
                 });
             }
             Value::Float(Float(left)) => {
@@ -140,6 +160,9 @@ impl Value {
                     BinOp::Sub => Value::Float(Float(left - right)),
                     BinOp::Mult => Value::Float(Float(left * right)),
                     BinOp::Div => Value::Float(Float(left / right)),
+                    BinOp::And | BinOp::Or => {
+                        return Err(EvalError::UnimplementedBinaryOperator(self, op.clone()));
+                    }
                 });
             }
             Value::Bool(left) => {
@@ -154,9 +177,11 @@ impl Value {
                     BinOp::LTEQ => Value::Bool(left <= *right),
                     BinOp::EQ => Value::Bool(left == *right),
                     BinOp::NEQ => Value::Bool(left != *right),
-                    BinOp::Mult => Value::Bool(left && *right),
-                    BinOp::Add => Value::Bool(left || *right),
-                    BinOp::Div | BinOp::Sub => unimplemented!(),
+                    BinOp::Mult | BinOp::And => Value::Bool(left && *right),
+                    BinOp::Add | BinOp::Or => Value::Bool(left || *right),
+                    BinOp::Div | BinOp::Sub => {
+                        return Err(EvalError::UnimplementedBinaryOperator(self, op.clone()));
+                    }
                 });
             }
         }
@@ -191,6 +216,11 @@ impl Statement {
 
                 Ok(())
             }
+            Statement::Print(expr) => {
+                let val = expr.eval(scope)?;
+                val.write(Rc::clone(&scope.writer))
+                    .map_err(|_| EvalError::WriteError)
+            }
         }
     }
 }
@@ -217,6 +247,8 @@ impl Expr {
 }
 
 mod test {
+    use std::borrow::Borrow;
+
     use super::*;
 
     #[test]
@@ -241,7 +273,7 @@ mod test {
                 .expect("expect node")
                 .expect("no error");
 
-            let mut scope = Scope::new();
+            let mut scope = Scope::new_stdout();
             let val = node.eval(&mut scope);
             assert_eq!(
                 val,
@@ -287,7 +319,7 @@ mod test {
                 .expect("expect node")
                 .expect("no error");
 
-            let mut scope = Scope::new();
+            let mut scope = Scope::new_stdout();
             let val = node.eval(&mut scope);
             assert_eq!(
                 val,
@@ -314,7 +346,7 @@ mod test {
         );
         assert_eq!(expected_evals.len(), statements.len());
 
-        let mut scope = Scope::new();
+        let mut scope = Scope::new_stdout();
         for ((rstatement, expected), expected_val) in statements
             .into_iter()
             .zip(expected_nodes.into_iter())
@@ -428,6 +460,7 @@ mod test {
             x + 2.0;
             const z = y = y + "a";
             z;
+            print z;
             1 == 6;"#;
         let expected_nodes: Vec<Statement> = vec![
             BinOp::Add
@@ -455,6 +488,7 @@ mod test {
                 typ: AssignType::CreateConst,
             },
             ident("z").statement(),
+            Statement::Print(ident("z")),
             BinOp::EQ.of(int(1), int(6)).statement(),
         ];
         let expected_evals: Vec<Option<Value>> = vec![
@@ -466,6 +500,7 @@ mod test {
             Some(Value::Float(Float(7.1))),
             None,
             Some(Value::String("za".to_string())),
+            None,
             Some(Value::Bool(false)),
         ];
 
@@ -488,7 +523,7 @@ mod test {
             ))
         );
 
-        let mut scope = Scope::new();
+        let mut scope = Scope::new_stdout();
         assert_eq!(node.eval(&mut scope), Ok(Value::Bool(false)));
 
         assert_eq!(parser.parse_new_expr(), None);
@@ -505,11 +540,51 @@ mod test {
             .expect("expected no error");
         assert_eq!(node, BinOp::Add.of(BinOp::Mult.of(int(5), int(4)), int(2)));
 
-        let mut scope = Scope::new();
+        let mut scope = Scope::new_stdout();
         assert_eq!(node.eval(&mut scope), Ok(Value::Integer(22)));
 
         assert_eq!(parser.parse_new_expr(), None);
         assert_eq!(parser.parse_new_expr(), None);
+    }
+
+    fn exec_and_get_stdout(code: &str) -> String {
+        let mut parser = Parser::from_str(code);
+        let (mut scope, cursor) = Scope::new_cursor();
+
+        for res in parser {
+            let statement = res.expect("Expected no error while parsing");
+            statement
+                .eval(&mut scope)
+                .expect("Expected no error while evaluating");
+        }
+        let raw = cursor.as_ref().borrow().get_ref().clone();
+        let encoded = String::from_utf8(raw);
+
+        encoded.expect("Expected valid UTF8")
+    }
+
+    #[test]
+    fn test_print() {
+        for (code, expect) in vec![
+            ("print 5 * 4;", "20"),
+            ("print true + false;", "true"),
+            // ("print true * false;", "false"),
+            // (
+            //     "
+            //     const x = 10 + 2;
+            //     print x-1;",
+            //     "11",
+            // ),
+            // (
+            //     r#"
+            //     var x = "abc" + "d";
+            //     x = x + "e";
+            //     print x + "z";"#,
+            //     "abcdez",
+            // ),
+        ] {
+            assert_eq!(exec_and_get_stdout(code), expect);
+        }
     }
 }
 

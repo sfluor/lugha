@@ -1,11 +1,17 @@
 use crate::lexer::{Float, KeywordType, Lexer, LexerError, SymbolType, Token, TokenType};
 use std::{
+    borrow::BorrowMut,
+    cell::RefCell,
     collections::{HashMap, HashSet},
+    fmt::{write, Debug, Display},
     iter::Peekable,
+    rc::Rc,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BinOp {
+    Or,
+    And,
     Add,
     Sub,
     Mult,
@@ -16,6 +22,29 @@ pub enum BinOp {
     LTEQ,
     EQ,
     NEQ,
+}
+
+impl Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "abc",
+            // match self {
+            //     BinOp::Or => "Or",
+            //     BinOp::And => "And",
+            //     BinOp::Add => "Add",
+            //     BinOp::Sub => "Sub",
+            //     BinOp::Mult => "Mult",
+            //     BinOp::Div => "Div",
+            //     BinOp::GT => "GT",
+            //     BinOp::LT => "LT",
+            //     BinOp::GTEQ => "GTEQ",
+            //     BinOp::LTEQ => "LTEQ",
+            //     BinOp::EQ => "EQ",
+            //     BinOp::NEQ => "NEQ",
+            // }
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +58,16 @@ pub enum Value {
 impl Value {
     pub fn ex(self) -> Expr {
         Expr::Literal(self)
+    }
+
+    pub fn write(&self, writer: Rc<RefCell<dyn std::io::Write>>) -> Result<(), std::io::Error> {
+        let mut writer = (*writer).borrow_mut();
+        match self {
+            Value::String(s) => writer.write(s.as_bytes()).map(|_| ()),
+            Value::Float(Float(f)) => write!(writer, "{f}"),
+            Value::Integer(i) => write!(writer, "{i}"),
+            Value::Bool(b) => write!(writer, "{b}"),
+        }
     }
 }
 
@@ -62,6 +101,12 @@ impl BinOp {
 pub enum UnaOp {
     Neg,
     Not,
+}
+
+impl Display for UnaOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_string())
+    }
 }
 
 impl UnaOp {
@@ -99,6 +144,7 @@ pub enum Statement {
         branches: Vec<(Expr, Vec<Statement>)>,
         default: Vec<Statement>,
     },
+    Print(Expr),
 }
 
 impl Statement {
@@ -137,6 +183,7 @@ impl Statement {
 
                 Ok(Type::Statement)
             }
+            Statement::Print(expr) => expr.type_check(scope),
         }
     }
 }
@@ -165,15 +212,33 @@ impl Expr {
                 }
 
                 match op {
+                    BinOp::Or | BinOp::And => {
+                        Type::is(Type::Boolean, left, ltype)?;
+                        Type::is(Type::Boolean, left, rtype)
+                    }
                     BinOp::Add => {
                         // TODO Avoid computing the type multiple times.
-                        Type::or3(Type::Integer, Type::Float, Type::String, left, ltype)?;
+                        Type::or3(
+                            op.to_string(),
+                            Type::Integer,
+                            Type::Float,
+                            Type::String,
+                            left,
+                            ltype,
+                        )?;
 
-                        Type::or3(Type::Integer, Type::Float, Type::String, right, rtype)
+                        Type::or3(
+                            op.to_string(),
+                            Type::Integer,
+                            Type::Float,
+                            Type::String,
+                            right,
+                            rtype,
+                        )
                     }
                     BinOp::Sub | BinOp::Mult | BinOp::Div => {
                         // We only check left since we already checked that left and right were equal
-                        Type::or2(Type::Integer, Type::Float, left, ltype)
+                        Type::or2(op.to_string(), Type::Integer, Type::Float, left, ltype)
                     }
                     BinOp::GT | BinOp::LT | BinOp::GTEQ | BinOp::LTEQ | BinOp::EQ | BinOp::NEQ => {
                         // As long as the two types are equal we're good.
@@ -184,7 +249,7 @@ impl Expr {
             Expr::Unary(op, expr) => {
                 let typ = expr.type_check(scope)?;
                 match op {
-                    UnaOp::Neg => Type::or2(Type::Integer, Type::Float, expr, typ),
+                    UnaOp::Neg => Type::or2(op.to_string(), Type::Integer, Type::Float, expr, typ),
                     UnaOp::Not => Type::Boolean.is(expr, typ),
                 }
             }
@@ -217,6 +282,7 @@ enum Type {
 impl Type {
     // TODO: Could be a macro
     fn or3(
+        op: String,
         typ1: Type,
         typ2: Type,
         typ3: Type,
@@ -225,6 +291,7 @@ impl Type {
     ) -> Result<Type, ParserError> {
         if actual != typ1 && actual != typ2 && actual != typ3 {
             Err(ParserError::TypesError {
+                op: op,
                 expected: vec![typ1, typ2, typ3],
                 actual,
                 expr: expr.clone(),
@@ -234,9 +301,16 @@ impl Type {
         }
     }
 
-    fn or2(typ1: Type, typ2: Type, expr: &Expr, actual: Type) -> Result<Type, ParserError> {
+    fn or2(
+        op: String,
+        typ1: Type,
+        typ2: Type,
+        expr: &Expr,
+        actual: Type,
+    ) -> Result<Type, ParserError> {
         if actual != typ1 && actual != typ2 {
             Err(ParserError::TypesError {
+                op: op,
                 expected: vec![typ1, typ2],
                 actual,
                 expr: expr.clone(),
@@ -267,6 +341,7 @@ pub enum ParserError {
         expected: TokenType,
     },
     TypesError {
+        op: String,
         expected: Vec<Type>,
         actual: Type,
         expr: Expr,
@@ -291,6 +366,7 @@ pub enum ParserError {
     InvalidAssignment(Expr),
     InvalidAssignmentToConst(String, Expr),
     InvalidConditionType(Expr, Type),
+    UnterminatedPrint(Token),
 }
 
 struct ParserScope<'a> {
@@ -418,6 +494,27 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_print(&mut self) -> Option<Result<Statement, ParserError>> {
+        let token = self.consume(TokenType::Keyword(KeywordType::Print));
+        if let Err(err) = token {
+            return Some(Err(err));
+        }
+        let token = token.unwrap();
+
+        let expr = match self.parse_new_expr() {
+            Some(res) => match res {
+                Ok(expr) => expr,
+                Err(err) => return Some(Err(err)),
+            },
+            None => {
+                return Some(Err(ParserError::UnterminatedPrint(token)));
+            }
+        };
+
+        None
+        // Some(Ok(Statement::Print(expr)))
+    }
+
     fn parse_assignment(
         &mut self,
         identifier: String,
@@ -491,6 +588,9 @@ impl<'a> Parser<'a> {
             }
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Var) => {
                 self.parse_declaration(false)
+            }
+            Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Print) => {
+                self.parse_print()
             }
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::If) => {
                 expect_colon = false;

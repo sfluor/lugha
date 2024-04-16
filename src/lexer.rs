@@ -193,6 +193,8 @@ impl Lexer {
             pos: 0,
             // TODO: could be a static variable
             keywords: HashMap::from_iter(vec![
+                ("or", KeywordType::Or),
+                ("and", KeywordType::And),
                 ("for", KeywordType::For),
                 ("while", KeywordType::While),
                 ("const", KeywordType::Const),
@@ -200,6 +202,7 @@ impl Lexer {
                 ("true", KeywordType::True),
                 ("false", KeywordType::False),
                 ("if", KeywordType::If),
+                ("print", KeywordType::Print),
                 ("else", KeywordType::Else),
                 ("elif", KeywordType::Elif),
                 ("break", KeywordType::Break),
