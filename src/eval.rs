@@ -56,8 +56,8 @@ impl<'a> Scope<'a> {
         ch
     }
 
-    fn set(&mut self, name: String, val: Value, constant: bool) -> Result<(), EvalError> {
-        if self.constants.contains(name.as_str()) {
+    fn set(&mut self, name: &str, val: Value, constant: bool) -> Result<(), EvalError> {
+        if self.constants.contains(name) {
             return Err(EvalError::OverridingConstant(name.to_string(), val));
         }
 
@@ -188,17 +188,26 @@ impl Value {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum StatementValue {
+    Break,
+    Return(Value),
+    Empty,
+}
+
 impl Statement {
-    fn eval(self, scope: &mut Scope) -> Result<(), EvalError> {
+    fn eval(&self, scope: &mut Scope) -> Result<StatementValue, EvalError> {
         match self {
-            Statement::Expr(expr) => expr.eval(scope).map(|_| ()),
+            Statement::Expr(expr) => expr.eval(scope).map(|_| StatementValue::Empty),
             Statement::Assign {
                 identifier,
                 expr,
                 typ,
             } => {
                 let val = expr.eval(scope)?;
-                scope.set(identifier, val, typ == AssignType::CreateConst)
+                scope
+                    .set(identifier, val, *typ == AssignType::CreateConst)
+                    .map(|_| StatementValue::Empty)
             }
             Statement::Conditional { branches, default } => {
                 for (expr, branch) in branches {
@@ -206,7 +215,7 @@ impl Statement {
                         for stmt in branch {
                             stmt.eval(scope)?;
                         }
-                        return Ok(());
+                        return Ok(StatementValue::Empty);
                     };
                 }
 
@@ -214,19 +223,33 @@ impl Statement {
                     stmt.eval(scope)?;
                 }
 
-                Ok(())
+                Ok(StatementValue::Empty)
             }
             Statement::Print(expr) => {
                 let val = expr.eval(scope)?;
                 val.write(Rc::clone(&scope.writer))
+                    .map(|_| StatementValue::Empty)
                     .map_err(|_| EvalError::WriteError)
             }
+            Statement::While { cond, statements } => 'outer: loop {
+                let cond_val = cond.eval(scope)?;
+                if dbg!(cond_val) != Value::Bool(true) {
+                    return Ok(StatementValue::Empty);
+                }
+
+                for s in statements {
+                    if let StatementValue::Break = dbg!(dbg!(s).eval(scope)?) {
+                        return Ok(StatementValue::Empty);
+                    }
+                }
+            },
+            Statement::Break => Ok(StatementValue::Break),
         }
     }
 }
 
 impl Expr {
-    pub fn eval(self, scope: &mut Scope) -> Result<Value, EvalError> {
+    pub fn eval(&self, scope: &mut Scope) -> Result<Value, EvalError> {
         match self {
             Expr::Binary(left, op, right) => left.eval(scope)?.bin(&op, &right.eval(scope)?),
             Expr::Unary(op, node) => node.eval(scope)?.unary(&op),
@@ -564,7 +587,7 @@ mod test {
     }
 
     #[test]
-    fn test_print() {
+    fn test_with_print() {
         for (code, expect) in vec![
             ("print 5 * 4;", "20"),
             ("print true + false;", "true"),
@@ -574,6 +597,25 @@ mod test {
                 const x = 10 + 2;
                 print x-1;",
                 "11",
+            ),
+            (
+                r#"
+                var x = 0;
+                print x;
+                print "-";
+                while x < 100 {
+                    x = x + 1;
+                }
+                print x;
+                print "-";
+                while x < 500 {
+                    if x > 150 {
+                        print "breaking";
+                        break;
+                    }
+                }
+                print x;"#,
+                "0-100-breaking151",
             ),
             (
                 r#"

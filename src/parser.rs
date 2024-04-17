@@ -142,6 +142,11 @@ pub enum AssignType {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Statement {
     Expr(Expr),
+    While {
+        cond: Expr,
+        statements: Vec<Statement>,
+    },
+    Break,
     Assign {
         identifier: String,
         expr: Expr,
@@ -191,6 +196,14 @@ impl Statement {
                 Ok(Type::Statement)
             }
             Statement::Print(expr) => expr.type_check(scope),
+            Statement::While { cond, statements } => {
+                cond.type_check(scope)?;
+                for s in statements {
+                    s.type_check(scope)?;
+                }
+                Ok(Type::Statement)
+            }
+            Statement::Break => Ok(Type::Statement),
         }
     }
 }
@@ -450,6 +463,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_break(&mut self) -> Option<Result<Statement, ParserError>> {
+        let token = self.consume(TokenType::Keyword(KeywordType::Break));
+        if let Err(err) = token {
+            return Some(Err(err));
+        }
+        Some(Ok(Statement::Break))
+    }
+
     fn parse_print(&mut self) -> Option<Result<Statement, ParserError>> {
         let token = self.consume(TokenType::Keyword(KeywordType::Print));
         if let Err(err) = token {
@@ -546,8 +567,15 @@ impl<'a> Parser<'a> {
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Var) => {
                 self.parse_declaration(false)
             }
+            Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Break) => {
+                self.parse_break()
+            }
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Print) => {
                 self.parse_print()
+            }
+            Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::While) => {
+                expect_colon = false;
+                self.parse_while()
             }
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::If) => {
                 expect_colon = false;
@@ -766,6 +794,15 @@ impl<'a> Parser<'a> {
         let tuple: (Expr, Vec<Statement>) = (cond, if_true.unwrap());
 
         Some(Ok(tuple))
+    }
+
+    fn parse_while(&mut self) -> Option<Result<Statement, ParserError>> {
+        let if_parse = self.parse_condition_branch(KeywordType::While)?;
+        let Ok((cond, statements)) = if_parse else {
+            return Some(Err(if_parse.unwrap_err()));
+        };
+
+        Some(Ok(Statement::While { cond, statements }))
     }
 
     fn parse_conditional(&mut self) -> Option<Result<Statement, ParserError>> {
