@@ -225,7 +225,18 @@ impl Statement {
             }
             Statement::Break => Ok(Type::Statement),
             Statement::Return(expr) => {
-                expr.type_check(scope)?;
+                let Some(ref expected) = scope.return_type else {
+                    return Err(ParserError::InvalidReturnOutsideFunction(expr.clone()));
+                };
+
+                let typ = expr.type_check(scope)?;
+                if *expected != typ {
+                    return Err(ParserError::InvalidReturnType {
+                        expected: expected.clone(),
+                        actual: typ,
+                    });
+                }
+
                 Ok(Type::Statement)
             }
         }
@@ -298,9 +309,8 @@ impl Expr {
                 Value::Integer(_) => Type::Integer,
                 Value::Bool(_) => Type::Boolean,
                 Value::Function { signature, body } => {
-                    let mut scope = scope.child();
+                    let mut scope = scope.child(Some(signature.ret_type.clone()));
                     for (name, typ) in signature.args.iter() {
-                        // TODO: avoid cloning
                         scope.mark(name.clone(), typ.clone(), false)?;
                     }
                     for s in body {
@@ -309,7 +319,13 @@ impl Expr {
                     Type::Function(Rc::clone(signature))
                 }
             }),
-            Expr::Identifier(ident) => scope.get(ident),
+            Expr::Identifier(ident) => {
+                println!(
+                    "Custom backtrace: {}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+                dbg!(scope).get(ident)
+            }
             Expr::Assign { identifier, expr } => {
                 scope.can_be_assigned(identifier, expr)?;
                 expr.type_check(scope)
@@ -395,12 +411,20 @@ pub enum ParserError {
     UnterminatedFuncDecl,
     InvalidTypeDecl(Box<ParserError>),
     EmptyReturnValue,
+    InvalidReturnOutsideFunction(Expr),
+    InvalidReturnType {
+        expected: Type,
+        actual: Type,
+    },
 }
 
+#[derive(Debug)]
 struct ParserScope<'a> {
     parent: Option<Box<&'a ParserScope<'a>>>,
     var_types: HashMap<String, Type>,
     constants: HashSet<String>,
+    // The expected return type of the current function if we are in a function.
+    return_type: Option<Type>,
 }
 
 impl<'a> ParserScope<'a> {
@@ -409,10 +433,13 @@ impl<'a> ParserScope<'a> {
             parent: None,
             var_types: HashMap::new(),
             constants: HashSet::new(),
+            return_type: None,
         }
     }
-    fn child(&self) -> ParserScope {
+
+    fn child(&self, return_type: Option<Type>) -> ParserScope {
         let mut ch = ParserScope::new();
+        ch.return_type = return_type;
         ch.parent = Some(Box::new(self));
 
         ch
@@ -466,7 +493,19 @@ impl<'a> Iterator for Parser<'a> {
         if self.error {
             None
         } else {
-            self.parse_statement().inspect(|r| self.error = r.is_err())
+            match self.parse_statement() {
+                None => None,
+                Some(Err(err)) => {
+                    self.error = true;
+                    Some(Err(err))
+                }
+                Some(Ok(stmt)) => {
+                    if let Err(err) = stmt.type_check(&mut self.scope) {
+                        return Some(Err(err));
+                    }
+                    Some(Ok(stmt))
+                }
+            }
         }
     }
 }
@@ -681,12 +720,6 @@ impl<'a> Parser<'a> {
 
         if expect_colon {
             if let Err(err) = self.consume(TokenType::Symbol(SymbolType::SemiColon)) {
-                return Some(Err(err));
-            }
-        }
-
-        if let Some(Ok(ref stmt)) = result {
-            if let Err(err) = stmt.type_check(&mut self.scope) {
                 return Some(Err(err));
             }
         }
@@ -1102,8 +1135,70 @@ mod test {
 
     #[test]
     fn test_func() {
-        let mut parser = Parser::from_str(
-            r#"const f = func(x int, y string, b float) -> float {
+        let signature = Rc::new(FuncSignature {
+            args: vec![
+                ("x".to_owned(), Type::Integer),
+                ("y".to_owned(), Type::String),
+                ("b".to_owned(), Type::Float),
+            ],
+            ret_type: Type::Float,
+        });
+
+        let signature_empty = Rc::new(FuncSignature {
+            args: vec![],
+            ret_type: Type::Integer,
+        });
+
+        let signature_mono = Rc::new(FuncSignature {
+            args: vec![("a".to_owned(), Type::Integer)],
+            ret_type: Type::Integer,
+        });
+
+        let signature_of_func = Rc::new(FuncSignature {
+            args: vec![
+                ("a".to_owned(), Type::Integer),
+                ("f".to_owned(), Type::Function(Rc::clone(&signature_mono))),
+                ("b".to_owned(), Type::String),
+            ],
+            ret_type: Type::Function(Rc::clone(&signature_empty)),
+        });
+        let table: Vec<(&str, Vec<Statement>)> = vec![
+            (
+                r"const fx = func() -> int {
+                    return 1;
+                };",
+                vec![Statement::Assign {
+                    identifier: "fx".to_owned(),
+                    expr: Expr::Literal(Value::Function {
+                        signature: Rc::clone(&signature_empty),
+                        body: vec![Statement::Return(int(1))],
+                    }),
+                    typ: AssignType::CreateConst,
+                }],
+            ),
+            (
+                r"const fx = func(a int, f func(a int) -> int, b string) -> func() -> int {
+                    return func() -> int {
+                        return a + 1;
+                    };
+                };",
+                vec![Statement::Assign {
+                    identifier: "fx".to_owned(),
+                    expr: Expr::Literal(Value::Function {
+                        signature: Rc::clone(&signature_of_func),
+                        body: vec![Statement::Return(
+                            Value::Function {
+                                signature: Rc::clone(&signature_empty),
+                                body: vec![Statement::Return(BinOp::Add.of(ident("a"), int(1)))],
+                            }
+                            .ex(),
+                        )],
+                    }),
+                    typ: AssignType::CreateConst,
+                }],
+            ),
+            (
+                r#"const f = func(x int, y string, b float) -> float {
                 if b > 1.0 {
                     return b;
                 } else {
@@ -1111,38 +1206,36 @@ mod test {
                 }
             };
             "#,
-        );
-
-        // TODO: test nested functions
-
-        let expected_stmts = vec![
-            Statement::Assign {
-                identifier: "x".to_string(),
-                expr: int(10),
-                typ: AssignType::CreateConst,
-            },
-            Statement::Assign {
-                identifier: "y".to_string(),
-                expr: ident("x"),
-                typ: AssignType::CreateConst,
-            },
-            Statement::Assign {
-                identifier: "z".to_string(),
-                expr: BinOp::Add.of(string("a"), string("b")),
-                typ: AssignType::CreateConst,
-            },
+                vec![Statement::Assign {
+                    identifier: "f".to_owned(),
+                    expr: Expr::Literal(Value::Function {
+                        signature: Rc::clone(&signature),
+                        body: vec![Statement::Conditional {
+                            branches: vec![(
+                                BinOp::GT.of(ident("b"), float(1.0)),
+                                vec![Statement::Return(ident("b"))],
+                            )],
+                            default: vec![Statement::Return(BinOp::Sub.of(ident("b"), float(4.3)))],
+                        }],
+                    }),
+                    typ: AssignType::CreateConst,
+                }],
+            ),
         ];
 
-        for expected in expected_stmts {
-            let stmt = parser
-                .next()
-                .expect("expected statement")
-                .expect("expected no error");
-            assert_eq!(stmt, expected, "Expected {:?} to be {:?}", stmt, expected);
-        }
+        for (inp, expected_stmts) in table {
+            let mut parser = Parser::from_str(inp);
+            for expected in expected_stmts {
+                let stmt = parser
+                    .next()
+                    .expect("expected statement")
+                    .expect("expected no error");
+                assert_eq!(stmt, expected, "Expected {:?} to be {:?}", stmt, expected);
+            }
 
-        assert_eq!(parser.parse_new_expr(), None);
-        assert_eq!(parser.parse_new_expr(), None);
+            assert_eq!(parser.next(), None);
+            assert_eq!(parser.next(), None);
+        }
     }
 }
 // TODO test return;
