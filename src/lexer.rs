@@ -12,12 +12,17 @@ pub struct Token {
 pub enum KeywordType {
     And,
     Break,
+    Return,
     Const,
     Else,
     Elif,
     False,
     For,
     Func,
+    Int,
+    String,
+    Float,
+    Bool,
     If,
     Or,
     Print,
@@ -30,13 +35,19 @@ impl KeywordType {
     fn len(&self) -> usize {
         match self {
             KeywordType::If | KeywordType::Or => 2,
-            KeywordType::And | KeywordType::For | KeywordType::Var => 3,
-            KeywordType::Elif | KeywordType::Else | KeywordType::True | KeywordType::Func => 4,
-            KeywordType::Break
+            KeywordType::Int | KeywordType::And | KeywordType::For | KeywordType::Var => 3,
+            KeywordType::Bool
+            | KeywordType::Elif
+            | KeywordType::Else
+            | KeywordType::True
+            | KeywordType::Func => 4,
+            KeywordType::Float
+            | KeywordType::Break
             | KeywordType::False
             | KeywordType::Const
             | KeywordType::Print
             | KeywordType::While => 5,
+            KeywordType::Return | KeywordType::String => 6,
             KeywordType::Println => 7,
         }
     }
@@ -46,6 +57,7 @@ impl KeywordType {
 pub enum SymbolType {
     Lparen,
     Rparen,
+    Comma,
     LBracket,
     RBracket,
     Plus,
@@ -63,12 +75,14 @@ pub enum SymbolType {
     EqEq,
     Percentage,
     Colon,
+    Arrow,
 }
 
 impl SymbolType {
     fn len(&self) -> usize {
         match self {
             SymbolType::Plus
+            | SymbolType::Comma
             | SymbolType::Minus
             | SymbolType::LBracket
             | SymbolType::RBracket
@@ -83,7 +97,11 @@ impl SymbolType {
             | SymbolType::GT
             | SymbolType::LT
             | SymbolType::Bang => 1,
-            SymbolType::LTEQ | SymbolType::BangEq | SymbolType::EqEq | SymbolType::GTEQ => 2,
+            SymbolType::Arrow
+            | SymbolType::LTEQ
+            | SymbolType::BangEq
+            | SymbolType::EqEq
+            | SymbolType::GTEQ => 2,
         }
     }
 }
@@ -135,6 +153,8 @@ impl TokenType {
             },
             TokenType::Symbol(symbol) => match symbol {
                 SymbolType::SemiColon
+                | SymbolType::Arrow
+                | SymbolType::Comma
                 | SymbolType::Lparen
                 | SymbolType::Rparen
                 | SymbolType::LBracket
@@ -209,7 +229,12 @@ impl Lexer {
                 ("else", KeywordType::Else),
                 ("elif", KeywordType::Elif),
                 ("break", KeywordType::Break),
+                ("return", KeywordType::Return),
                 ("func", KeywordType::Func),
+                ("int", KeywordType::Int),
+                ("string", KeywordType::String),
+                ("float", KeywordType::Float),
+                ("bool", KeywordType::Bool),
             ]),
         }
     }
@@ -244,7 +269,7 @@ impl Lexer {
         let sym = if single {
             match ch {
                 '+' => SymbolType::Plus,
-                '-' => SymbolType::Minus,
+                ',' => SymbolType::Comma,
                 '/' => SymbolType::Slash,
                 '*' => SymbolType::Star,
                 ':' => SymbolType::Colon,
@@ -264,6 +289,10 @@ impl Lexer {
             }
         } else {
             match ch {
+                '-' => match self.peek() {
+                    Some('>') => SymbolType::Arrow,
+                    _ => SymbolType::Minus,
+                },
                 '=' => match self.peek() {
                     Some('=') => SymbolType::EqEq,
                     _ => SymbolType::Eq,
@@ -356,8 +385,8 @@ impl Lexer {
         };
 
         let ttype = Some(match ch {
-            '+' | '-' | '*' | '/' | ':' | ';' | '(' | ')' | '{' | '}' => self.symbol(true),
-            '=' | '!' | '>' | '<' => self.symbol(false),
+            '+' | '*' | '/' | ':' | ';' | '(' | ')' | '{' | '}' | ',' => self.symbol(true),
+            '=' | '-' | '!' | '>' | '<' => self.symbol(false),
             'A'..='Z' | 'a'..='z' => self.identifier(),
             '"' => self.string(),
             '0'..='9' => self.number(),
@@ -435,7 +464,7 @@ mod tests {
                 line: 0,
             },
             Token {
-                typ: TokenType::Identifier("int".to_string()),
+                typ: TokenType::Keyword(KeywordType::Int),
                 start: 7,
                 end: 10,
                 line: 0,
@@ -489,7 +518,7 @@ mod tests {
                 line: 1,
             },
             Token {
-                typ: TokenType::Identifier("string".to_string()),
+                typ: TokenType::Keyword(KeywordType::String),
                 start: 26,
                 end: 32,
                 line: 1,

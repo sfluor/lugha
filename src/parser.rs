@@ -1,6 +1,5 @@
-use crate::lexer::{Float, KeywordType, Lexer, LexerError, SymbolType, Token, TokenType};
+use crate::lexer::{self, Float, KeywordType, Lexer, LexerError, SymbolType, Token, TokenType};
 use std::{
-    borrow::BorrowMut,
     cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::{write, Debug, Display},
@@ -48,11 +47,27 @@ impl Display for BinOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FuncSignature {
+    args: Vec<(String, Type)>,
+    ret_type: Type,
+}
+
+impl Display for FuncSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Function({:?}) -> {}", self.args, self.ret_type)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
     String(String),
     Float(Float),
     Integer(i64),
     Bool(bool),
+    Function {
+        signature: Rc<FuncSignature>,
+        body: Vec<Statement>,
+    },
 }
 
 impl Value {
@@ -67,6 +82,7 @@ impl Value {
             Value::Float(Float(f)) => write!(writer, "{f}"),
             Value::Integer(i) => write!(writer, "{i}"),
             Value::Bool(b) => write!(writer, "{b}"),
+            Value::Function { signature, body } => write!(writer, "{signature}"),
         }
     }
 }
@@ -139,7 +155,7 @@ pub enum AssignType {
     CreateVar,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Statement {
     Expr(Expr),
     While {
@@ -147,6 +163,7 @@ pub enum Statement {
         statements: Vec<Statement>,
     },
     Break,
+    Return(Expr),
     Assign {
         identifier: String,
         expr: Expr,
@@ -207,6 +224,10 @@ impl Statement {
                 Ok(Type::Statement)
             }
             Statement::Break => Ok(Type::Statement),
+            Statement::Return(expr) => {
+                expr.type_check(scope)?;
+                Ok(Type::Statement)
+            }
         }
     }
 }
@@ -276,6 +297,17 @@ impl Expr {
                 Value::Float(_) => Type::Float,
                 Value::Integer(_) => Type::Integer,
                 Value::Bool(_) => Type::Boolean,
+                Value::Function { signature, body } => {
+                    let mut scope = scope.child();
+                    for (name, typ) in signature.args.iter() {
+                        // TODO: avoid cloning
+                        scope.mark(name.clone(), typ.clone(), false)?;
+                    }
+                    for s in body {
+                        s.type_check(&mut scope)?;
+                    }
+                    Type::Function(Rc::clone(signature))
+                }
             }),
             Expr::Identifier(ident) => scope.get(ident),
             Expr::Assign { identifier, expr } => {
@@ -294,7 +326,26 @@ enum Type {
     Boolean,
     // Used for statement blocks that do not return anything.
     Statement,
+    Function(Rc<FuncSignature>),
     // TODO: functions and custom types
+}
+
+impl Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Type::String => "string",
+                Type::Float => "float",
+                Type::Integer => "int",
+                Type::Boolean => "bool",
+                Type::Statement => "statement",
+                Type::Function(signature) =>
+                    return write!(f, "{}", signature.to_string().as_str()),
+            }
+        )
+    }
 }
 
 fn is_type(op: &str, expr: &Expr, actual: Type, expected: &[Type]) -> Result<Type, ParserError> {
@@ -315,7 +366,7 @@ pub enum ParserError {
     Lexing(LexerError),
     ConsumeError {
         actual: Option<Token>,
-        expected: TokenType,
+        detail: String,
     },
     TypesError {
         op: String,
@@ -339,6 +390,11 @@ pub enum ParserError {
     InvalidAssignmentToConst(String, Expr),
     InvalidConditionType(Expr, Type),
     UnterminatedPrint(Token),
+    ParseTypeError(Token),
+    EmptyTypeDecl,
+    UnterminatedFuncDecl,
+    InvalidTypeDecl(Box<ParserError>),
+    EmptyReturnValue,
 }
 
 struct ParserScope<'a> {
@@ -444,11 +500,14 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn consume(&mut self, expected: TokenType) -> Result<Token, ParserError> {
+    fn expect<F>(&mut self, cond: F, detail: String) -> Result<Token, ParserError>
+    where
+        F: FnOnce(&TokenType) -> bool,
+    {
         let Some(res) = self.lexer.next() else {
             return Err(ParserError::ConsumeError {
                 actual: None,
-                expected,
+                detail,
             });
         };
 
@@ -456,13 +515,35 @@ impl<'a> Parser<'a> {
             return Err(ParserError::Lexing(res.unwrap_err()));
         };
 
-        if token.typ != expected {
+        if !cond(&token.typ) {
             Err(ParserError::ConsumeError {
                 actual: Some(token),
-                expected: expected,
+                detail,
             })
         } else {
             Ok(token)
+        }
+    }
+
+    fn consume(&mut self, expected: TokenType) -> Result<Token, ParserError> {
+        self.expect(
+            |typ| *typ == expected,
+            format!("Expected token type: {expected:?}"),
+        )
+    }
+
+    fn parse_return(&mut self) -> Option<Result<Statement, ParserError>> {
+        let token = self.consume(TokenType::Keyword(KeywordType::Return));
+        if let Err(err) = token {
+            return Some(Err(err));
+        }
+
+        // TODO handle empty returns
+        let expr = self.parse_new_expr();
+        match expr {
+            None => Some(Err(ParserError::EmptyReturnValue)),
+            Some(Err(err)) => Some(Err(err)),
+            Some(Ok(expr)) => Some(Ok(Statement::Return(expr))),
         }
     }
 
@@ -547,7 +628,7 @@ impl<'a> Parser<'a> {
                     _ => {
                         return Some(Err(ParserError::ConsumeError {
                             actual: Some(tok),
-                            expected: TokenType::Identifier("any".to_string()),
+                            detail: "expected identifier name".to_owned(),
                         }))
                     }
                 },
@@ -573,6 +654,9 @@ impl<'a> Parser<'a> {
             }
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Var) => {
                 self.parse_declaration(false)
+            }
+            Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Return) => {
+                self.parse_return()
             }
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Break) => {
                 self.parse_break()
@@ -611,6 +695,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_precedence(&mut self, precedence: u8) -> Option<Result<Expr, ParserError>> {
+        dbg!("Parse prec: {precedence}");
         let Some(res) = self.lexer.next() else {
             return None;
         };
@@ -619,7 +704,7 @@ impl<'a> Parser<'a> {
             return Some(Err(ParserError::Lexing(res.unwrap_err())));
         };
 
-        let parsed = self.parse_prefix(token);
+        let parsed = dbg!(self.parse_prefix(token));
         let Ok(mut node) = parsed else {
             return Some(parsed);
         };
@@ -648,7 +733,7 @@ impl<'a> Parser<'a> {
             };
 
             let next_node_res: Result<Expr, ParserError> =
-                self.parse_precedence(next_precedence)?;
+                dbg!(self.parse_precedence(next_precedence)?);
             let Ok(next_node) = next_node_res else {
                 return Some(next_node_res);
             };
@@ -674,11 +759,13 @@ impl<'a> Parser<'a> {
                         expr: next_node.b(),
                     }
                 }
-                SymbolType::Bang => todo!(),
-                SymbolType::Percentage => todo!(),
-                SymbolType::Colon => todo!(),
-                SymbolType::SemiColon => todo!(),
-                SymbolType::RBracket
+                SymbolType::Arrow
+                | SymbolType::Bang
+                | SymbolType::Comma
+                | SymbolType::Percentage
+                | SymbolType::Colon
+                | SymbolType::SemiColon
+                | SymbolType::RBracket
                 | SymbolType::LBracket
                 | SymbolType::Rparen
                 | SymbolType::Lparen => todo!(),
@@ -708,6 +795,75 @@ impl<'a> Parser<'a> {
         result
     }
 
+    fn parse_type_decl(&mut self) -> Result<Type, ParserError> {
+        let Some(res) = self.lexer.next() else {
+            return Err(ParserError::EmptyTypeDecl);
+        };
+
+        let token = res.map_err(|err| ParserError::Lexing(err))?;
+        Ok(match token.typ {
+            TokenType::Keyword(KeywordType::Bool) => Type::Boolean,
+            TokenType::Keyword(KeywordType::Int) => Type::Integer,
+            TokenType::Keyword(KeywordType::String) => Type::String,
+            TokenType::Keyword(KeywordType::Float) => Type::Float,
+            TokenType::Keyword(KeywordType::Func) => {
+                Type::Function(Rc::new(self.parse_func_signature()?))
+            }
+            _ => return Err(ParserError::ParseTypeError(token)),
+        })
+    }
+
+    fn parse_func_signature(&mut self) -> Result<FuncSignature, ParserError> {
+        self.consume(TokenType::Symbol(SymbolType::Lparen))?;
+
+        let args: Vec<(String, Type)> = self.lex_until(
+            |token| token.typ == TokenType::Symbol(SymbolType::Rparen),
+            |this, idx| {
+                dbg!(idx);
+                if idx > 0 {
+                    if let Err(err) = this.consume(TokenType::Symbol(SymbolType::Comma)) {
+                        return Some(Err(err));
+                    }
+                }
+                // parse identifier and then parse type declaration
+                let ident = dbg!(this.expect(
+                    |typ| matches!(typ, TokenType::Identifier(_)),
+                    "expected argument name".to_owned(),
+                ));
+                let name = match ident {
+                    Err(err) => return Some(Err(err)),
+                    Ok(Token {
+                        typ: TokenType::Identifier(name),
+                        ..
+                    }) => name,
+                    _ => unreachable!(),
+                };
+
+                let type_decl = this.parse_type_decl();
+                if let Err(err) = type_decl {
+                    return Some(Err(ParserError::InvalidTypeDecl(Box::new(err))));
+                }
+
+                Some(Ok(dbg!((name, type_decl.expect("Error checked before")))))
+            },
+        )?;
+
+        self.consume(TokenType::Symbol(SymbolType::Rparen))?;
+        self.consume(TokenType::Symbol(SymbolType::Arrow))?;
+        let ret_type = self.parse_type_decl()?;
+        Ok(FuncSignature { args, ret_type })
+    }
+
+    fn parse_func(&mut self) -> Result<Expr, ParserError> {
+        let signature = self.parse_func_signature()?;
+        let body = self.parse_block().unwrap_or_else(|| Ok(vec![]))?;
+
+        Ok(Expr::Literal(Value::Function {
+            signature: Rc::new(signature),
+            body,
+        }))
+    }
+
     fn parse_prefix(&mut self, token: Token) -> Result<Expr, ParserError> {
         match token.typ {
             TokenType::IntLiteral(_, ref val) => Ok(Expr::Literal(Value::Integer(*val))),
@@ -720,6 +876,7 @@ impl<'a> Parser<'a> {
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
             TokenType::Keyword(ref val) => match val {
+                KeywordType::Func => self.parse_func(),
                 KeywordType::False => Ok(Expr::Literal(Value::Bool(false))),
                 KeywordType::True => Ok(Expr::Literal(Value::Bool(true))),
                 _ => Err(ParserError::InvalidPrefix(token)),
@@ -731,7 +888,7 @@ impl<'a> Parser<'a> {
     fn lex_until<C, F, T>(&mut self, cond: C, mut consumer: F) -> Result<Vec<T>, ParserError>
     where
         C: Fn(&Token) -> bool,
-        F: FnMut(&mut Self) -> Option<Result<T, ParserError>>,
+        F: FnMut(&mut Self, usize) -> Option<Result<T, ParserError>>,
     {
         let mut acc = Vec::new();
         loop {
@@ -739,11 +896,11 @@ impl<'a> Parser<'a> {
                 None => return Ok(acc),
                 Some(Err(err)) => return Err(ParserError::Lexing(err.clone())),
                 Some(Ok(token)) => {
-                    if cond(token) {
+                    if dbg!(cond(token)) {
                         return Ok(acc);
                     }
 
-                    if let Some(data) = consumer(self) {
+                    if let Some(data) = consumer(self, acc.len()) {
                         acc.push(data?);
                     } else {
                         return Ok(acc);
@@ -760,7 +917,7 @@ impl<'a> Parser<'a> {
 
         let block = self.lex_until(
             |token| token.typ == TokenType::Symbol(SymbolType::RBracket),
-            |this| this.parse_statement(),
+            |this, _| this.parse_statement(),
         );
         if let Err(err) = block {
             return Some(Err(err));
@@ -942,4 +1099,50 @@ mod test {
         assert_eq!(parser.parse_new_expr(), None);
         assert_eq!(parser.parse_new_expr(), None);
     }
+
+    #[test]
+    fn test_func() {
+        let mut parser = Parser::from_str(
+            r#"const f = func(x int, y string, b float) -> float {
+                if b > 1.0 {
+                    return b;
+                } else {
+                    return b - 4.3;
+                }
+            };
+            "#,
+        );
+
+        // TODO: test nested functions
+
+        let expected_stmts = vec![
+            Statement::Assign {
+                identifier: "x".to_string(),
+                expr: int(10),
+                typ: AssignType::CreateConst,
+            },
+            Statement::Assign {
+                identifier: "y".to_string(),
+                expr: ident("x"),
+                typ: AssignType::CreateConst,
+            },
+            Statement::Assign {
+                identifier: "z".to_string(),
+                expr: BinOp::Add.of(string("a"), string("b")),
+                typ: AssignType::CreateConst,
+            },
+        ];
+
+        for expected in expected_stmts {
+            let stmt = parser
+                .next()
+                .expect("expected statement")
+                .expect("expected no error");
+            assert_eq!(stmt, expected, "Expected {:?} to be {:?}", stmt, expected);
+        }
+
+        assert_eq!(parser.parse_new_expr(), None);
+        assert_eq!(parser.parse_new_expr(), None);
+    }
 }
+// TODO test return;

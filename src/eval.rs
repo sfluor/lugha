@@ -1,4 +1,3 @@
-use std::borrow::BorrowMut;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -93,14 +92,21 @@ impl Value {
             UnaOp::Neg => match self {
                 Value::Float(Float(f)) => Ok(Value::Float(Float(-f))),
                 Value::Integer(i) => Ok(Value::Integer(-i)),
-                Value::String(_) | Value::Bool(_) => {
-                    Err(EvalError::UnimplementedUnaryOperator(self, op.clone()))
-                }
+                Value::String(_)
+                | Value::Bool(_)
+                | Value::Function {
+                    signature: _,
+                    body: _,
+                } => Err(EvalError::UnimplementedUnaryOperator(self, op.clone())),
             },
             UnaOp::Not => match self {
-                Value::String(_) | Value::Float(_) | Value::Integer(_) => {
-                    Err(EvalError::UnimplementedUnaryOperator(self, op.clone()))
-                }
+                Value::String(_)
+                | Value::Float(_)
+                | Value::Integer(_)
+                | Value::Function {
+                    signature: _,
+                    body: _,
+                } => Err(EvalError::UnimplementedUnaryOperator(self, op.clone())),
                 Value::Bool(v) => Ok(Value::Bool(!v)),
             },
         }
@@ -108,6 +114,10 @@ impl Value {
 
     pub fn bin(self, op: &BinOp, other: &Value) -> Result<Value, EvalError> {
         match self {
+            Value::Function {
+                signature: _,
+                body: _,
+            } => Err(EvalError::UnimplementedBinaryOperator(self, op.clone())),
             Value::String(ref left) => {
                 let Value::String(right) = other else {
                     return Err(EvalError::BinTypeMismatch(self, other.clone()));
@@ -263,6 +273,7 @@ impl Statement {
                 }
             },
             Statement::Break => Ok(StatementValue::Return(None)),
+            Statement::Return(expr) => Ok(StatementValue::Return(Some(expr.eval(scope)?))),
         }
     }
 }
@@ -670,3 +681,5 @@ breaking
 }
 
 // TODO a*b = 5 should fail
+// TODO disallow return inside loops
+// TODO disallow breaks outside loops
