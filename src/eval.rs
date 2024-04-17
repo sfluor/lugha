@@ -568,20 +568,23 @@ mod test {
         for (code, expect) in vec![
             ("print 5 * 4;", "20"),
             ("print true + false;", "true"),
-            // ("print true * false;", "false"),
-            // (
-            //     "
-            //     const x = 10 + 2;
-            //     print x-1;",
-            //     "11",
-            // ),
-            // (
-            //     r#"
-            //     var x = "abc" + "d";
-            //     x = x + "e";
-            //     print x + "z";"#,
-            //     "abcdez",
-            // ),
+            ("print true * false;", "false"),
+            (
+                "
+                const x = 10 + 2;
+                print x-1;",
+                "11",
+            ),
+            (
+                r#"
+                var x = "abc" + "d";
+                x = x + "e";
+                print x + "z";
+                print 55.123;
+                print x = x + "j";
+                "#,
+                "abcdez55.123abcdej",
+            ),
         ] {
             assert_eq!(exec_and_get_stdout(code), expect);
         }
