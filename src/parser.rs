@@ -156,7 +156,10 @@ pub enum Statement {
         branches: Vec<(Expr, Vec<Statement>)>,
         default: Vec<Statement>,
     },
-    Print(Expr),
+    Print {
+        expr: Expr,
+        newline: bool,
+    },
 }
 
 impl Statement {
@@ -195,7 +198,7 @@ impl Statement {
 
                 Ok(Type::Statement)
             }
-            Statement::Print(expr) => expr.type_check(scope),
+            Statement::Print { expr, newline } => expr.type_check(scope),
             Statement::While { cond, statements } => {
                 cond.type_check(scope)?;
                 for s in statements {
@@ -471,8 +474,12 @@ impl<'a> Parser<'a> {
         Some(Ok(Statement::Break))
     }
 
-    fn parse_print(&mut self) -> Option<Result<Statement, ParserError>> {
-        let token = self.consume(TokenType::Keyword(KeywordType::Print));
+    fn parse_print(&mut self, newline: bool) -> Option<Result<Statement, ParserError>> {
+        let token = self.consume(TokenType::Keyword(if newline {
+            KeywordType::Println
+        } else {
+            KeywordType::Print
+        }));
         if let Err(err) = token {
             return Some(Err(err));
         }
@@ -488,7 +495,7 @@ impl<'a> Parser<'a> {
             }
         };
 
-        Some(Ok(Statement::Print(expr)))
+        Some(Ok(Statement::Print { expr, newline }))
     }
 
     fn parse_assignment(
@@ -570,8 +577,12 @@ impl<'a> Parser<'a> {
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Break) => {
                 self.parse_break()
             }
-            Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Print) => {
-                self.parse_print()
+            Some(Ok(tok))
+                if tok.typ == TokenType::Keyword(KeywordType::Print)
+                    || tok.typ == TokenType::Keyword(KeywordType::Println) =>
+            {
+                let newline = tok.typ == TokenType::Keyword(KeywordType::Println);
+                self.parse_print(newline)
             }
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::While) => {
                 expect_colon = false;

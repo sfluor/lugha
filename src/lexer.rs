@@ -21,6 +21,7 @@ pub enum KeywordType {
     If,
     Or,
     Print,
+    Println,
     True,
     Var,
     While,
@@ -36,6 +37,7 @@ impl KeywordType {
             | KeywordType::Const
             | KeywordType::Print
             | KeywordType::While => 5,
+            KeywordType::Println => 7,
         }
     }
 }
@@ -203,6 +205,7 @@ impl Lexer {
                 ("false", KeywordType::False),
                 ("if", KeywordType::If),
                 ("print", KeywordType::Print),
+                ("println", KeywordType::Println),
                 ("else", KeywordType::Else),
                 ("elif", KeywordType::Elif),
                 ("break", KeywordType::Break),

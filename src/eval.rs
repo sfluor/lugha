@@ -1,3 +1,4 @@
+use std::borrow::BorrowMut;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -5,6 +6,8 @@ use std::rc::Rc;
 
 use crate::lexer::Float;
 use crate::parser::*;
+
+const NEWLINE_VEC: [u8; 1] = [b'\n'];
 
 #[derive(Debug, PartialEq, Eq)]
 enum EvalError {
@@ -190,8 +193,7 @@ impl Value {
 
 #[derive(Debug, PartialEq, Eq)]
 enum StatementValue {
-    Break,
-    Return(Value),
+    Return(Option<Value>),
     Empty,
 }
 
@@ -213,23 +215,40 @@ impl Statement {
                 for (expr, branch) in branches {
                     if let Value::Bool(true) = expr.eval(scope)? {
                         for stmt in branch {
-                            stmt.eval(scope)?;
+                            if let StatementValue::Return(r) = stmt.eval(scope)? {
+                                // We must propagate up returns even inside conditions.
+                                return Ok(StatementValue::Return(r));
+                            }
                         }
                         return Ok(StatementValue::Empty);
                     };
                 }
 
                 for stmt in default {
-                    stmt.eval(scope)?;
+                    if let StatementValue::Return(r) = stmt.eval(scope)? {
+                        return Ok(StatementValue::Return(r));
+                    }
                 }
 
                 Ok(StatementValue::Empty)
             }
-            Statement::Print(expr) => {
+            Statement::Print { expr, newline } => {
                 let val = expr.eval(scope)?;
-                val.write(Rc::clone(&scope.writer))
+
+                let res = val
+                    .write(Rc::clone(&scope.writer))
                     .map(|_| StatementValue::Empty)
-                    .map_err(|_| EvalError::WriteError)
+                    .map_err(|_| EvalError::WriteError)?;
+
+                if *newline {
+                    (*scope.writer)
+                        .borrow_mut()
+                        .write(&NEWLINE_VEC)
+                        .map(|_| StatementValue::Empty)
+                        .map_err(|_| EvalError::WriteError)?;
+                }
+
+                Ok(res)
             }
             Statement::While { cond, statements } => 'outer: loop {
                 let cond_val = cond.eval(scope)?;
@@ -238,12 +257,12 @@ impl Statement {
                 }
 
                 for s in statements {
-                    if let StatementValue::Break = dbg!(dbg!(s).eval(scope)?) {
+                    if let StatementValue::Return(_) = s.eval(scope)? {
                         return Ok(StatementValue::Empty);
                     }
                 }
             },
-            Statement::Break => Ok(StatementValue::Break),
+            Statement::Break => Ok(StatementValue::Return(None)),
         }
     }
 }
@@ -484,6 +503,7 @@ mod test {
             const z = y = y + "a";
             z;
             print z;
+            println z;
             1 == 6;"#;
         let expected_nodes: Vec<Statement> = vec![
             BinOp::Add
@@ -511,7 +531,14 @@ mod test {
                 typ: AssignType::CreateConst,
             },
             ident("z").statement(),
-            Statement::Print(ident("z")),
+            Statement::Print {
+                expr: ident("z"),
+                newline: false,
+            },
+            Statement::Print {
+                expr: ident("z"),
+                newline: true,
+            },
             BinOp::EQ.of(int(1), int(6)).statement(),
         ];
         let expected_evals: Vec<Option<Value>> = vec![
@@ -523,6 +550,7 @@ mod test {
             Some(Value::Float(Float(7.1))),
             None,
             Some(Value::String("za".to_string())),
+            None,
             None,
             Some(Value::Bool(false)),
         ];
@@ -601,21 +629,29 @@ mod test {
             (
                 r#"
                 var x = 0;
-                print x;
+                println x;
                 print "-";
+                println "";
                 while x < 100 {
                     x = x + 1;
                 }
-                print x;
+                println x;
                 print "-";
+                println "";
                 while x < 500 {
+                    x = x + 7;
                     if x > 150 {
-                        print "breaking";
+                        println "breaking";
                         break;
                     }
                 }
                 print x;"#,
-                "0-100-breaking151",
+                "0
+-
+100
+-
+breaking
+156",
             ),
             (
                 r#"
