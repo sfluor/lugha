@@ -416,6 +416,7 @@ pub enum ParserError {
         expected: Type,
         actual: Type,
     },
+    InvalidFuncCall(Expr),
 }
 
 #[derive(Debug)]
@@ -727,6 +728,23 @@ impl<'a> Parser<'a> {
         result
     }
 
+    fn parse_func_call(&mut self, left: Expr) -> Result<Expr, ParserError> {
+        // TODO: we could support inline function declarations and call
+        // (func () -> int)()
+        // by removing this identifier restriction
+        let Expr::Identifier(name) = left else {
+            return Err(ParserError::InvalidFuncCall(left));
+        };
+
+        sc
+
+            // TODO resolve the func now
+        Expr::FuncCall {
+            identifier: name,
+            expr: next_node.b(),
+        }
+    }
+
     fn parse_precedence(&mut self, precedence: u8) -> Option<Result<Expr, ParserError>> {
         dbg!("Parse prec: {precedence}");
         let Some(res) = self.lexer.next() else {
@@ -765,8 +783,17 @@ impl<'a> Parser<'a> {
                 return Some(Err(ParserError::InvalidInfix(next_token)));
             };
 
+            // Function calls don't "just" evaluate the next node so handle them separately.
+            if symbol == SymbolType::Lparen {
+                node = match self.parse_func_call(node) {
+                    Ok(n) => n,
+                    Err(err) => return Some(Err(err)),
+                };
+                continue;
+            }
+
             let next_node_res: Result<Expr, ParserError> =
-                dbg!(self.parse_precedence(next_precedence)?);
+                self.parse_precedence(next_precedence)?;
             let Ok(next_node) = next_node_res else {
                 return Some(next_node_res);
             };
@@ -792,7 +819,8 @@ impl<'a> Parser<'a> {
                         expr: next_node.b(),
                     }
                 }
-                SymbolType::Arrow
+                SymbolType::Lparen
+                | SymbolType::Arrow
                 | SymbolType::Bang
                 | SymbolType::Comma
                 | SymbolType::Percentage
@@ -1131,6 +1159,60 @@ mod test {
 
         assert_eq!(parser.parse_new_expr(), None);
         assert_eq!(parser.parse_new_expr(), None);
+    }
+
+    #[test]
+    fn test_func_typechecks() {
+        let table: Vec<(&str, ParserError)> = vec![
+            (
+                r#"const fx = func(a int) -> int {
+                    return a + 1;
+                };
+                fx(1);
+                fx(1.0);
+                "#,
+                ParserError::BinTypeError {
+                    left: Type::Integer,
+                    right: Type::Float,
+                    expr: BinOp::Add.of(ident("a"), float(1.0)),
+                },
+            ),
+            (
+                r#"const fx = func(a int) -> float {
+                    return a + 1.0;
+                };"#,
+                ParserError::BinTypeError {
+                    left: Type::Integer,
+                    right: Type::Float,
+                    expr: BinOp::Add.of(ident("a"), float(1.0)),
+                },
+            ),
+            (
+                r#"const fx = func() -> int {
+                    return "1";
+                };"#,
+                ParserError::InvalidReturnType {
+                    expected: Type::Integer,
+                    actual: Type::String,
+                },
+            ),
+        ];
+
+        let mut found_err = false;
+        for (inp, expected_err) in table {
+            let mut parser = Parser::from_str(inp);
+            while let Some(chunk) = parser.next() {
+                match chunk {
+                    Err(err) => {
+                        assert_eq!(err, expected_err);
+                        assert_eq!(parser.next(), None);
+                        found_err = true;
+                    }
+                    _ => (),
+                }
+            }
+            assert!(found_err, "Expected error in:\n{inp}");
+        }
     }
 
     #[test]

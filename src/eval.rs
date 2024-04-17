@@ -281,6 +281,7 @@ impl Statement {
 impl Expr {
     pub fn eval(&self, scope: &mut Scope) -> Result<Value, EvalError> {
         match self {
+            // TODO: fix a || b shouldn't evaluate b
             Expr::Binary(left, op, right) => left.eval(scope)?.bin(&op, &right.eval(scope)?),
             Expr::Unary(op, node) => node.eval(scope)?.unary(&op),
             Expr::Literal(value) => Ok(value.clone()),
