@@ -9,7 +9,7 @@ use crate::parser::*;
 const NEWLINE_VEC: [u8; 1] = [b'\n'];
 
 #[derive(Debug, PartialEq, Eq)]
-enum EvalError {
+pub enum EvalError {
     BinTypeMismatch(Value, Value),
     UnimplementedBinaryOperator(Value, BinOp),
     UnimplementedUnaryOperator(Value, UnaOp),
@@ -37,7 +37,7 @@ impl<'a> Scope<'a> {
         Self::new(Rc::new(RefCell::new(std::io::stdout())))
     }
 
-    fn new_cursor() -> (Scope<'a>, Rc<RefCell<Cursor<Vec<u8>>>>) {
+    pub fn new_cursor() -> (Scope<'a>, Rc<RefCell<Cursor<Vec<u8>>>>) {
         let mut cursor = Cursor::new(Vec::new());
         let cell = Rc::new(RefCell::new(cursor));
         let cloned = Rc::clone(&cell);
@@ -204,14 +204,14 @@ impl Value {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum StatementValue {
+pub enum StatementValue {
     Break,
     Return(Value),
     Empty,
 }
 
 impl Statement {
-    fn eval(&self, scope: &mut Scope) -> Result<StatementValue, EvalError> {
+    pub fn eval(&self, scope: &mut Scope) -> Result<StatementValue, EvalError> {
         match self {
             Statement::Expr(expr) => expr.eval(scope).map(|_| StatementValue::Empty),
             Statement::Assign {
