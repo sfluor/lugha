@@ -17,6 +17,7 @@ enum EvalError {
     OverridingConstant(String, Value),
     WriteError,
     MissingReturnInFunction(Rc<FuncSignature>),
+    UnknownFuncReference(String),
 }
 
 struct Variable {
@@ -303,13 +304,18 @@ impl Expr {
                 // TODO use a stack for arguments instead of referencing them via the scope
                 let Value::Function { signature, body } = scope
                     .get(identifier)
-                    .ok_or_else(|| EvalError::UnknownVariableReference(identifier.clone()))?
+                    .ok_or_else(|| EvalError::UnknownFuncReference(identifier.clone()))?
                 else {
                     // We type-checked before
                     unreachable!();
                 };
 
                 let mut scope = scope.child();
+
+                for (arg, (name, _)) in args.iter().zip(signature.args.iter()) {
+                    let val = arg.eval(&mut scope)?;
+                    scope.set(name, val, false)?;
+                }
 
                 for stmt in body {
                     if let StatementValue::Return(r) = stmt.eval(&mut scope)? {
@@ -667,6 +673,17 @@ mod test {
                 const x = 10 + 2;
                 print x-1;",
                 "11",
+            ),
+            (
+                "const fact = func(n int) -> int {
+                    if n < 2 {
+                        return 1;
+                    }
+
+                    return n * fact(n-1);
+                };
+                print fact(10);",
+                "3628800",
             ),
             (
                 r#"

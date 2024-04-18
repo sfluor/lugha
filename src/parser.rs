@@ -48,7 +48,7 @@ impl Display for BinOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FuncSignature {
-    args: Vec<(String, Type)>,
+    pub args: Vec<(String, Type)>,
     ret_type: Type,
 }
 
@@ -190,12 +190,26 @@ impl Statement {
                 expr,
                 typ: assign_type,
             } => {
+                // We do this here to handle recursion, otherwise we wouldn't be able to know the
+                // return type until we type check but upon typechecking we would consider the
+                // recursive call as unknown
+                let mut marked = false;
+                let constant = *assign_type == AssignType::CreateConst;
+
+                if let Expr::Literal(Value::Function { signature, body }) = expr {
+                    scope.mark(
+                        identifier.clone(),
+                        Type::Function(Rc::clone(signature)),
+                        constant,
+                    )?;
+                    marked = true;
+                };
+
                 let typ = expr.type_check(scope)?;
-                scope.mark(
-                    identifier.clone(),
-                    typ.clone(),
-                    *assign_type == AssignType::CreateConst,
-                )?;
+
+                if !marked {
+                    scope.mark(identifier.clone(), typ.clone(), constant)?;
+                }
                 Ok(typ)
             }
             Statement::Conditional { branches, default } => {
@@ -226,11 +240,12 @@ impl Statement {
             }
             Statement::Break => Ok(Type::Statement),
             Statement::Return(expr) => {
-                let Some(ref expected) = scope.return_type else {
+                let Some(_) = scope.return_type else {
                     return Err(ParserError::InvalidReturnOutsideFunction(expr.clone()));
                 };
 
                 let typ = expr.type_check(scope)?;
+                let expected = scope.return_type.as_ref().unwrap();
                 if *expected != typ {
                     return Err(ParserError::InvalidReturnType {
                         expected: expected.clone(),
@@ -253,7 +268,7 @@ impl Expr {
         Statement::Expr(self)
     }
 
-    fn type_check(&self, scope: &ParserScope) -> Result<Type, ParserError> {
+    fn type_check(&self, scope: &mut ParserScope) -> Result<Type, ParserError> {
         match self {
             Expr::Binary(left, op, right) => {
                 let ltype = left.type_check(scope)?;
@@ -362,7 +377,7 @@ impl Expr {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Type {
+pub enum Type {
     String,
     Float,
     Integer,
@@ -727,7 +742,7 @@ impl<'a> Parser<'a> {
 
     fn parse_statement(&mut self) -> Option<Result<Statement, ParserError>> {
         let mut expect_colon = true;
-        let result: Option<Result<Statement, ParserError>> = match dbg!(self.lexer.peek()) {
+        let result: Option<Result<Statement, ParserError>> = match self.lexer.peek() {
             Some(Err(err)) => return Some(Err(ParserError::Lexing(err.clone()))),
             None => return None,
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Const) => {
@@ -807,7 +822,7 @@ impl<'a> Parser<'a> {
             return Some(Err(ParserError::Lexing(res.unwrap_err())));
         };
 
-        let parsed = dbg!(self.parse_prefix(token));
+        let parsed = self.parse_prefix(token);
         let Ok(mut node) = parsed else {
             return Some(parsed);
         };
@@ -825,11 +840,11 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            let next_token: Token = dbg!(self
+            let next_token: Token = self
                 .lexer
                 .next()
                 .expect("Expected next token to exist since precedence existed")
-                .expect("Expected no error"));
+                .expect("Expected no error");
 
             let TokenType::Symbol(symbol) = next_token.typ else {
                 return Some(Err(ParserError::InvalidInfix(next_token)));
