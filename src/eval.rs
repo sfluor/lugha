@@ -16,6 +16,7 @@ enum EvalError {
     UnknownVariableReference(String),
     OverridingConstant(String, Value),
     WriteError,
+    MissingReturnInFunction(Rc<FuncSignature>),
 }
 
 struct Variable {
@@ -203,7 +204,8 @@ impl Value {
 
 #[derive(Debug, PartialEq, Eq)]
 enum StatementValue {
-    Return(Option<Value>),
+    Break,
+    Return(Value),
     Empty,
 }
 
@@ -224,19 +226,24 @@ impl Statement {
             Statement::Conditional { branches, default } => {
                 for (expr, branch) in branches {
                     if let Value::Bool(true) = expr.eval(scope)? {
-                        for stmt in branch {
-                            if let StatementValue::Return(r) = stmt.eval(scope)? {
-                                // We must propagate up returns even inside conditions.
-                                return Ok(StatementValue::Return(r));
+                        for s in branch {
+                            // We must propagate up returns even inside conditions.
+                            let sv = s.eval(scope)?;
+                            match sv {
+                                StatementValue::Break | StatementValue::Return(_) => return Ok(sv),
+                                StatementValue::Empty => (),
                             }
                         }
                         return Ok(StatementValue::Empty);
                     };
                 }
 
-                for stmt in default {
-                    if let StatementValue::Return(r) = stmt.eval(scope)? {
-                        return Ok(StatementValue::Return(r));
+                for s in default {
+                    // We must propagate up returns even inside conditions.
+                    let sv = s.eval(scope)?;
+                    match sv {
+                        StatementValue::Break | StatementValue::Return(_) => return Ok(sv),
+                        StatementValue::Empty => (),
                     }
                 }
 
@@ -262,18 +269,20 @@ impl Statement {
             }
             Statement::While { cond, statements } => 'outer: loop {
                 let cond_val = cond.eval(scope)?;
-                if dbg!(cond_val) != Value::Bool(true) {
+                if cond_val != Value::Bool(true) {
                     return Ok(StatementValue::Empty);
                 }
 
                 for s in statements {
-                    if let StatementValue::Return(_) = s.eval(scope)? {
-                        return Ok(StatementValue::Empty);
+                    let sv = s.eval(scope)?;
+                    match sv {
+                        StatementValue::Break | StatementValue::Return(_) => return Ok(sv),
+                        StatementValue::Empty => (),
                     }
                 }
             },
-            Statement::Break => Ok(StatementValue::Return(None)),
-            Statement::Return(expr) => Ok(StatementValue::Return(Some(expr.eval(scope)?))),
+            Statement::Break => Ok(StatementValue::Break),
+            Statement::Return(expr) => Ok(StatementValue::Return(expr.eval(scope)?)),
         }
     }
 }
@@ -290,6 +299,27 @@ impl Expr {
                 Some(val) => Ok(val.clone()),
                 None => Err(EvalError::UnknownVariableReference(ident.to_string())),
             },
+            Expr::FuncCall { identifier, args } => {
+                // TODO use a stack for arguments instead of referencing them via the scope
+                let Value::Function { signature, body } = scope
+                    .get(identifier)
+                    .ok_or_else(|| EvalError::UnknownVariableReference(identifier.clone()))?
+                else {
+                    // We type-checked before
+                    unreachable!();
+                };
+
+                let mut scope = scope.child();
+
+                for stmt in body {
+                    if let StatementValue::Return(r) = stmt.eval(&mut scope)? {
+                        return Ok(r);
+                    }
+                }
+
+                // TODO: validate at parse time
+                Err(EvalError::MissingReturnInFunction(Rc::clone(signature)))
+            }
             Expr::Assign { identifier, expr } => {
                 let val = expr.eval(scope)?;
                 // TODO: no clone

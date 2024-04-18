@@ -152,10 +152,18 @@ impl TokenType {
                 _ => 0,
             },
             TokenType::Symbol(symbol) => match symbol {
+                SymbolType::Lparen => {
+                    if unary {
+                        // Grouping
+                        0
+                    } else {
+                        // Func call
+                        9
+                    }
+                }
                 SymbolType::SemiColon
                 | SymbolType::Arrow
                 | SymbolType::Comma
-                | SymbolType::Lparen
                 | SymbolType::Rparen
                 | SymbolType::LBracket
                 | SymbolType::RBracket => 0,

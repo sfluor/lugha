@@ -147,6 +147,7 @@ pub enum Expr {
     Literal(Value),
     Identifier(String),
     Assign { identifier: String, expr: BExpr },
+    FuncCall { identifier: String, args: Vec<Expr> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,16 +320,42 @@ impl Expr {
                     Type::Function(Rc::clone(signature))
                 }
             }),
-            Expr::Identifier(ident) => {
-                println!(
-                    "Custom backtrace: {}",
-                    std::backtrace::Backtrace::force_capture()
-                );
-                dbg!(scope).get(ident)
-            }
+            Expr::Identifier(ident) => scope.get(ident),
             Expr::Assign { identifier, expr } => {
                 scope.can_be_assigned(identifier, expr)?;
                 expr.type_check(scope)
+            }
+            Expr::FuncCall { identifier, args } => {
+                let typ = scope.get(identifier)?;
+                let Type::Function(signature) = typ else {
+                    return Err(ParserError::InvalidFunc(identifier.clone(), typ.clone()));
+                };
+
+                if signature.args.len() != args.len() {
+                    return Err(ParserError::InvalidFuncArgsNumber {
+                        func: identifier.clone(),
+                        expected: Rc::clone(&signature),
+                        got: args.clone(),
+                    });
+                }
+
+                for (idx, (arg, (name, expected))) in
+                    args.iter().zip(signature.args.iter()).enumerate()
+                {
+                    let argtype = arg.type_check(scope)?;
+                    if argtype != *expected {
+                        return Err(ParserError::InvalidArgType {
+                            func: identifier.clone(),
+                            argidx: idx,
+                            argname: name.clone(),
+                            expected: expected.clone(),
+                            got: argtype.clone(),
+                            arg: arg.clone(),
+                        });
+                    }
+                }
+
+                Ok(signature.ret_type.clone())
             }
         }
     }
@@ -417,6 +444,20 @@ pub enum ParserError {
         actual: Type,
     },
     InvalidFuncCall(Expr),
+    InvalidFunc(String, Type),
+    InvalidFuncArgsNumber {
+        func: String,
+        expected: Rc<FuncSignature>,
+        got: Vec<Expr>,
+    },
+    InvalidArgType {
+        func: String,
+        argidx: usize,
+        expected: Type,
+        got: Type,
+        arg: Expr,
+        argname: String,
+    },
 }
 
 #[derive(Debug)]
@@ -686,7 +727,7 @@ impl<'a> Parser<'a> {
 
     fn parse_statement(&mut self) -> Option<Result<Statement, ParserError>> {
         let mut expect_colon = true;
-        let result: Option<Result<Statement, ParserError>> = match self.lexer.peek() {
+        let result: Option<Result<Statement, ParserError>> = match dbg!(self.lexer.peek()) {
             Some(Err(err)) => return Some(Err(ParserError::Lexing(err.clone()))),
             None => return None,
             Some(Ok(tok)) if tok.typ == TokenType::Keyword(KeywordType::Const) => {
@@ -736,17 +777,28 @@ impl<'a> Parser<'a> {
             return Err(ParserError::InvalidFuncCall(left));
         };
 
-        sc
+        let args: Vec<Expr> = self.lex_until(
+            |token| token.typ == TokenType::Symbol(SymbolType::Rparen),
+            |this, idx| {
+                if idx > 0 {
+                    if let Err(err) = this.consume(TokenType::Symbol(SymbolType::Comma)) {
+                        return Some(Err(err));
+                    }
+                }
+                this.parse_new_expr()
+            },
+        )?;
 
-            // TODO resolve the func now
-        Expr::FuncCall {
+        self.consume(TokenType::Symbol(SymbolType::Rparen))?;
+
+        // TODO resolve the func now
+        Ok(Expr::FuncCall {
             identifier: name,
-            expr: next_node.b(),
-        }
+            args,
+        })
     }
 
     fn parse_precedence(&mut self, precedence: u8) -> Option<Result<Expr, ParserError>> {
-        dbg!("Parse prec: {precedence}");
         let Some(res) = self.lexer.next() else {
             return None;
         };
@@ -773,11 +825,11 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            let next_token: Token = self
+            let next_token: Token = dbg!(self
                 .lexer
                 .next()
                 .expect("Expected next token to exist since precedence existed")
-                .expect("Expected no error");
+                .expect("Expected no error"));
 
             let TokenType::Symbol(symbol) = next_token.typ else {
                 return Some(Err(ParserError::InvalidInfix(next_token)));
@@ -845,7 +897,7 @@ impl<'a> Parser<'a> {
     }
 
     fn grouping(&mut self, token: Token) -> Result<Expr, ParserError> {
-        let Some(result) = self.parse_precedence(token.typ.precedence(false)) else {
+        let Some(result) = self.parse_precedence(token.typ.precedence(true)) else {
             return Err(ParserError::UnterminatedGrouping(token.clone()));
         };
 
@@ -880,17 +932,17 @@ impl<'a> Parser<'a> {
         let args: Vec<(String, Type)> = self.lex_until(
             |token| token.typ == TokenType::Symbol(SymbolType::Rparen),
             |this, idx| {
-                dbg!(idx);
+                idx;
                 if idx > 0 {
                     if let Err(err) = this.consume(TokenType::Symbol(SymbolType::Comma)) {
                         return Some(Err(err));
                     }
                 }
                 // parse identifier and then parse type declaration
-                let ident = dbg!(this.expect(
+                let ident = this.expect(
                     |typ| matches!(typ, TokenType::Identifier(_)),
                     "expected argument name".to_owned(),
-                ));
+                );
                 let name = match ident {
                     Err(err) => return Some(Err(err)),
                     Ok(Token {
@@ -905,7 +957,7 @@ impl<'a> Parser<'a> {
                     return Some(Err(ParserError::InvalidTypeDecl(Box::new(err))));
                 }
 
-                Some(Ok(dbg!((name, type_decl.expect("Error checked before")))))
+                Some(Ok((name, type_decl.expect("Error checked before"))))
             },
         )?;
 
@@ -957,7 +1009,7 @@ impl<'a> Parser<'a> {
                 None => return Ok(acc),
                 Some(Err(err)) => return Err(ParserError::Lexing(err.clone())),
                 Some(Ok(token)) => {
-                    if dbg!(cond(token)) {
+                    if cond(token) {
                         return Ok(acc);
                     }
 
@@ -1171,10 +1223,13 @@ mod test {
                 fx(1);
                 fx(1.0);
                 "#,
-                ParserError::BinTypeError {
-                    left: Type::Integer,
-                    right: Type::Float,
-                    expr: BinOp::Add.of(ident("a"), float(1.0)),
+                ParserError::InvalidArgType {
+                    func: "fx".to_owned(),
+                    argidx: 0,
+                    expected: Type::Integer,
+                    got: Type::Float,
+                    arg: float(1.0),
+                    argname: "a".to_owned(),
                 },
             ),
             (
