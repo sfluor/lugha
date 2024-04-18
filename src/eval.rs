@@ -675,6 +675,21 @@ mod test {
                 "11",
             ),
             (
+                "const fibo = func(n int) -> int {
+                    if n == 0 {
+                        return 0;
+                    } elif n == 1 {
+                        return 1;
+                    } else {
+                        return fibo(n-1) + fibo(n-2);
+                    }
+                };
+                println fibo(10);
+                print fibo(20);",
+                "55
+6765",
+            ),
+            (
                 "const fact = func(n int) -> int {
                     if n < 2 {
                         return 1;
