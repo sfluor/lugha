@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use lugha::eval::Scope;
 use lugha::parser::{Parser, Statement};
+use pprof::criterion::{Output, PProfProfiler};
 
 fn fibonacci(n: i32) {
     let code = "const fibo = func(n int) -> int {
@@ -34,5 +35,9 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("fib 20", |b| b.iter(|| fibonacci(black_box(20))));
 }
 
-criterion_group!(benches, criterion_benchmark);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    targets = criterion_benchmark
+}
 criterion_main!(benches);
