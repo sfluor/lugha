@@ -91,6 +91,10 @@ pub fn ident(name: &str) -> Expr {
     Expr::Identifier(name.to_owned())
 }
 
+pub fn param(i: usize) -> Expr {
+    Expr::Param(i)
+}
+
 pub fn boolean(b: bool) -> Expr {
     Value::Bool(b).ex()
 }
@@ -146,6 +150,7 @@ pub enum Expr {
     Unary(UnaOp, BExpr),
     Literal(Value),
     Identifier(String),
+    Param(usize),
     Assign { identifier: String, expr: BExpr },
     FuncCall { identifier: String, args: Vec<Expr> },
 }
@@ -326,8 +331,8 @@ impl Expr {
                 Value::Bool(_) => Type::Boolean,
                 Value::Function { signature, body } => {
                     let mut scope = scope.child(Some(signature.ret_type.clone()));
-                    for (name, typ) in signature.args.iter() {
-                        scope.mark(name.clone(), typ.clone(), false)?;
+                    for (idx, (name, typ)) in signature.args.iter().enumerate() {
+                        scope.mark_param(name.clone(), typ.clone(), idx);
                     }
                     for s in body {
                         s.type_check(&mut scope)?;
@@ -372,6 +377,10 @@ impl Expr {
 
                 Ok(signature.ret_type.clone())
             }
+            Expr::Param(idx) => match scope.param_types.get(*idx) {
+                Some(v) => Ok(v.clone()),
+                None => Err(ParserError::UnknownParamReference(*idx)),
+            },
         }
     }
 }
@@ -473,6 +482,7 @@ pub enum ParserError {
         arg: Expr,
         argname: String,
     },
+    UnknownParamReference(usize),
 }
 
 #[derive(Debug)]
@@ -480,6 +490,8 @@ struct ParserScope<'a> {
     parent: Option<Box<&'a ParserScope<'a>>>,
     var_types: HashMap<String, Type>,
     constants: HashSet<String>,
+    params: HashMap<String, usize>,
+    param_types: Vec<Type>,
     // The expected return type of the current function if we are in a function.
     return_type: Option<Type>,
 }
@@ -490,6 +502,8 @@ impl<'a> ParserScope<'a> {
             parent: None,
             var_types: HashMap::new(),
             constants: HashSet::new(),
+            params: HashMap::new(),
+            param_types: Vec::new(),
             return_type: None,
         }
     }
@@ -514,10 +528,19 @@ impl<'a> ParserScope<'a> {
         }
     }
 
+    fn mark_param(&mut self, name: String, typ: Type, idx: usize) {
+        self.params.insert(name, idx);
+        self.param_types.push(typ);
+    }
+
     // TODO: don't use hash map to index variables
     fn get(&self, name: &str) -> Result<Type, ParserError> {
         if let Some(val) = self.var_types.get(name) {
             return Ok(val.clone());
+        };
+
+        if let Some(idx) = self.params.get(name) {
+            return Ok(self.param_types[*idx].clone());
         };
 
         if let Some(ref par) = self.parent {
@@ -984,7 +1007,16 @@ impl<'a> Parser<'a> {
 
     fn parse_func(&mut self) -> Result<Expr, ParserError> {
         let signature = self.parse_func_signature()?;
+
+        for (idx, (name, typ)) in signature.args.iter().enumerate() {
+            self.scope.params.insert(name.clone(), idx);
+            self.scope.param_types.push(typ.clone());
+        }
+
         let body = self.parse_block().unwrap_or_else(|| Ok(vec![]))?;
+
+        self.scope.params.clear();
+        self.scope.param_types.clear();
 
         Ok(Expr::Literal(Value::Function {
             signature: Rc::new(signature),
@@ -1009,7 +1041,10 @@ impl<'a> Parser<'a> {
                 KeywordType::True => Ok(Expr::Literal(Value::Bool(true))),
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
-            TokenType::Identifier(identifier) => Ok(Expr::Identifier(identifier)),
+            TokenType::Identifier(identifier) => Ok(match self.scope.params.get(&identifier) {
+                Some(idx) => Expr::Param(*idx),
+                None => Expr::Identifier(identifier),
+            }),
         }
     }
 
@@ -1254,7 +1289,7 @@ mod test {
                 ParserError::BinTypeError {
                     left: Type::Integer,
                     right: Type::Float,
-                    expr: BinOp::Add.of(ident("a"), float(1.0)),
+                    expr: BinOp::Add.of(param(0), float(1.0)),
                 },
             ),
             (

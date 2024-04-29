@@ -22,7 +22,7 @@ fn fibonacci(n: i32) {
         .collect();
 
     // Run it multiple times to amortize the parsing
-    for i in 1..10 {
+    for _ in 1..10 {
         let (mut scope, _) = Scope::new_cursor();
 
         for s in &statements {
@@ -37,7 +37,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    config = Criterion::default();
     targets = criterion_benchmark
 }
 criterion_main!(benches);

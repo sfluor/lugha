@@ -18,6 +18,7 @@ pub enum EvalError {
     WriteError,
     MissingReturnInFunction(Rc<FuncSignature>),
     UnknownFuncReference(String),
+    UnknownParamReference(usize),
 }
 
 struct Variable {
@@ -29,6 +30,7 @@ pub struct Scope<'a> {
     writer: Rc<RefCell<dyn std::io::Write>>,
     parent: Option<Box<&'a Scope<'a>>>,
     locals: HashMap<String, Value>,
+    params: Vec<Value>,
     constants: HashSet<String>,
 }
 
@@ -49,6 +51,7 @@ impl<'a> Scope<'a> {
             writer,
             parent: None,
             locals: HashMap::new(),
+            params: Vec::new(),
             constants: HashSet::new(),
         }
     }
@@ -312,9 +315,9 @@ impl Expr {
 
                 let mut scope = scope.child();
 
-                for (arg, (name, _)) in args.iter().zip(signature.args.iter()) {
+                for arg in args {
                     let val = arg.eval(&mut scope)?;
-                    scope.set(name, val, false)?;
+                    scope.params.push(val);
                 }
 
                 for stmt in body {
@@ -332,6 +335,11 @@ impl Expr {
                 scope.set(identifier, val.clone(), false)?;
                 Ok(val)
             }
+            // TODO: don't clone
+            Expr::Param(idx) => match scope.param(*idx) {
+                Some(v) => Ok(v.clone()),
+                None => Err(EvalError::UnknownParamReference(*idx)),
+            },
         }
     }
 }

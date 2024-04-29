@@ -14,3 +14,8 @@ pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
 [[bench]]
 name = "eval"
 harness = false
+
+[profile.release]
+# This is useful when profiling, because lets the tools include your
+# function names in the profiling reports.
+debug = true
