@@ -91,6 +91,10 @@ pub fn ident(name: &str) -> Expr {
     Expr::Identifier(name.to_owned())
 }
 
+pub fn param(i: usize) -> Expr {
+    Expr::Param(i)
+}
+
 pub fn boolean(b: bool) -> Expr {
     Value::Bool(b).ex()
 }
@@ -146,6 +150,7 @@ pub enum Expr {
     Unary(UnaOp, BExpr),
     Literal(Value),
     Identifier(String),
+    Param(usize),
     Assign { identifier: String, expr: BExpr },
     FuncCall { identifier: String, args: Vec<Expr> },
 }
@@ -240,12 +245,12 @@ impl Statement {
             }
             Statement::Break => Ok(Type::Statement),
             Statement::Return(expr) => {
-                let Some(_) = scope.return_type else {
+                let Some(_) = scope.return_type.last() else {
                     return Err(ParserError::InvalidReturnOutsideFunction(expr.clone()));
                 };
 
                 let typ = expr.type_check(scope)?;
-                let expected = scope.return_type.as_ref().unwrap();
+                let expected = scope.return_type.last().unwrap();
                 if *expected != typ {
                     return Err(ParserError::InvalidReturnType {
                         expected: expected.clone(),
@@ -325,23 +330,22 @@ impl Expr {
                 Value::Integer(_) => Type::Integer,
                 Value::Bool(_) => Type::Boolean,
                 Value::Function { signature, body } => {
-                    let mut scope = scope.child(Some(signature.ret_type.clone()));
-                    for (name, typ) in signature.args.iter() {
-                        scope.mark(name.clone(), typ.clone(), false)?;
-                    }
+                    scope.start_func(signature);
                     for s in body {
-                        s.type_check(&mut scope)?;
+                        s.type_check(scope)?;
                     }
+                    scope.end_func(signature);
+
                     Type::Function(Rc::clone(signature))
                 }
             }),
-            Expr::Identifier(ident) => scope.get(ident),
+            Expr::Identifier(ident) => scope.get(ident).cloned(),
             Expr::Assign { identifier, expr } => {
                 scope.can_be_assigned(identifier, expr)?;
                 expr.type_check(scope)
             }
             Expr::FuncCall { identifier, args } => {
-                let typ = scope.get(identifier)?;
+                let typ = scope.get(identifier)?.clone();
                 let Type::Function(signature) = typ else {
                     return Err(ParserError::InvalidFunc(identifier.clone(), typ.clone()));
                 };
@@ -372,6 +376,10 @@ impl Expr {
 
                 Ok(signature.ret_type.clone())
             }
+            Expr::Param(idx) => match scope.param_types.get(*idx) {
+                Some(v) => Ok(v.clone()),
+                None => Err(ParserError::UnknownParamReference(*idx)),
+            },
         }
     }
 }
@@ -473,33 +481,54 @@ pub enum ParserError {
         arg: Expr,
         argname: String,
     },
+    UnknownParamReference(usize),
 }
 
 #[derive(Debug)]
-struct ParserScope<'a> {
-    parent: Option<Box<&'a ParserScope<'a>>>,
+struct ParserScope {
     var_types: HashMap<String, Type>,
     constants: HashSet<String>,
-    // The expected return type of the current function if we are in a function.
-    return_type: Option<Type>,
+    // vec to allow shadowing variable references
+    params: HashMap<String, Vec<usize>>,
+    param_types: Vec<Type>,
+    // The expected return types of the current function if we are in a function.
+    return_type: Vec<Type>,
 }
 
-impl<'a> ParserScope<'a> {
-    fn new() -> ParserScope<'a> {
+impl ParserScope {
+    fn new() -> ParserScope {
         ParserScope {
-            parent: None,
             var_types: HashMap::new(),
             constants: HashSet::new(),
-            return_type: None,
+            params: HashMap::new(),
+            param_types: Vec::new(),
+            return_type: Vec::new(),
         }
     }
 
-    fn child(&self, return_type: Option<Type>) -> ParserScope {
-        let mut ch = ParserScope::new();
-        ch.return_type = return_type;
-        ch.parent = Some(Box::new(self));
+    fn start_func(&mut self, signature: &FuncSignature) {
+        // TODO no clone
+        self.return_type.push(signature.ret_type.clone());
+        for (name, typ) in signature.args.iter() {
+            self.params
+                .entry(name.clone())
+                .or_insert_with(|| Vec::new())
+                .push(self.param_types.len());
+            self.param_types.push(typ.clone());
+        }
+    }
 
-        ch
+    fn end_func(&mut self, signature: &FuncSignature) {
+        for (name, _) in signature.args.iter() {
+            self.params
+                .get_mut(name)
+                .expect("param name shouldn't be empty")
+                .pop();
+            // TODO we could check that the type matches here
+            self.param_types.pop();
+        }
+        // TODO we could check that the type matches here
+        self.return_type.pop();
     }
 
     fn mark(&mut self, name: String, typ: Type, constant: bool) -> Result<(), ParserError> {
@@ -515,13 +544,16 @@ impl<'a> ParserScope<'a> {
     }
 
     // TODO: don't use hash map to index variables
-    fn get(&self, name: &str) -> Result<Type, ParserError> {
+    fn get(&self, name: &str) -> Result<&Type, ParserError> {
         if let Some(val) = self.var_types.get(name) {
-            return Ok(val.clone());
+            return Ok(val);
         };
 
-        if let Some(ref par) = self.parent {
-            return par.get(name);
+        if let Some(idxs) = self.params.get(name) {
+            return idxs
+                .last()
+                .ok_or(ParserError::UnknownVariable(name.to_string()))
+                .map(|x| &self.param_types[*x]);
         };
 
         Err(ParserError::UnknownVariable(name.to_string()))
@@ -535,15 +567,11 @@ impl<'a> ParserScope<'a> {
             ));
         }
 
-        if let Some(ref par) = self.parent {
-            return par.can_be_assigned(identifier, expr);
-        };
-
         Ok(())
     }
 }
 
-impl<'a> Iterator for Parser<'a> {
+impl Iterator for Parser {
     type Item = Result<Statement, ParserError>;
 
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
@@ -567,14 +595,14 @@ impl<'a> Iterator for Parser<'a> {
     }
 }
 
-pub struct Parser<'a> {
+pub struct Parser {
     error: bool,
     lexer: Peekable<Lexer>,
-    scope: ParserScope<'a>,
+    scope: ParserScope,
 }
 
-impl<'a> Parser<'a> {
-    pub fn new(lexer: Lexer) -> Parser<'a> {
+impl Parser {
+    pub fn new(lexer: Lexer) -> Parser {
         Parser {
             error: false,
             lexer: lexer.peekable(),
@@ -582,7 +610,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn from_str(str: &'a str) -> Parser {
+    pub fn from_str(str: &str) -> Parser {
         Self::new(Lexer::new(str))
     }
 
@@ -984,7 +1012,10 @@ impl<'a> Parser<'a> {
 
     fn parse_func(&mut self) -> Result<Expr, ParserError> {
         let signature = self.parse_func_signature()?;
+
+        self.scope.start_func(&signature);
         let body = self.parse_block().unwrap_or_else(|| Ok(vec![]))?;
+        self.scope.end_func(&signature);
 
         Ok(Expr::Literal(Value::Function {
             signature: Rc::new(signature),
@@ -1009,7 +1040,13 @@ impl<'a> Parser<'a> {
                 KeywordType::True => Ok(Expr::Literal(Value::Bool(true))),
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
-            TokenType::Identifier(identifier) => Ok(Expr::Identifier(identifier)),
+            TokenType::Identifier(identifier) => Ok(match self.scope.params.get(&identifier) {
+                Some(idxs) => idxs
+                    .last()
+                    .map(|idx| Expr::Param(*idx))
+                    .unwrap_or(Expr::Identifier(identifier)),
+                None => Expr::Identifier(identifier),
+            }),
         }
     }
 
@@ -1254,7 +1291,7 @@ mod test {
                 ParserError::BinTypeError {
                     left: Type::Integer,
                     right: Type::Float,
-                    expr: BinOp::Add.of(ident("a"), float(1.0)),
+                    expr: BinOp::Add.of(param(0), float(1.0)),
                 },
             ),
             (
@@ -1341,7 +1378,7 @@ mod test {
                         body: vec![Statement::Return(
                             Value::Function {
                                 signature: Rc::clone(&signature_empty),
-                                body: vec![Statement::Return(BinOp::Add.of(ident("a"), int(1)))],
+                                body: vec![Statement::Return(BinOp::Add.of(param(0), int(1)))],
                             }
                             .ex(),
                         )],
@@ -1364,10 +1401,10 @@ mod test {
                         signature: Rc::clone(&signature),
                         body: vec![Statement::Conditional {
                             branches: vec![(
-                                BinOp::GT.of(ident("b"), float(1.0)),
-                                vec![Statement::Return(ident("b"))],
+                                BinOp::GT.of(param(2), float(1.0)),
+                                vec![Statement::Return(param(2))],
                             )],
-                            default: vec![Statement::Return(BinOp::Sub.of(ident("b"), float(4.3)))],
+                            default: vec![Statement::Return(BinOp::Sub.of(param(2), float(4.3)))],
                         }],
                     }),
                     typ: AssignType::CreateConst,
@@ -1382,7 +1419,11 @@ mod test {
                     .next()
                     .expect("expected statement")
                     .expect("expected no error");
-                assert_eq!(stmt, expected, "Expected {:?} to be {:?}", stmt, expected);
+                assert_eq!(
+                    stmt, expected,
+                    "Expected {:?} to be {:?} for input:\n{}",
+                    stmt, expected, inp
+                );
             }
 
             assert_eq!(parser.next(), None);
