@@ -1,15 +1,14 @@
+use crate::lexer::Float;
+use crate::parser::*;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
 
-use crate::lexer::Float;
-use crate::parser::*;
-
 const NEWLINE_VEC: [u8; 1] = [b'\n'];
 
 #[derive(Debug, PartialEq, Eq)]
-enum EvalError {
+pub enum EvalError {
     BinTypeMismatch(Value, Value),
     UnimplementedBinaryOperator(Value, BinOp),
     UnimplementedUnaryOperator(Value, UnaOp),
@@ -18,6 +17,8 @@ enum EvalError {
     WriteError,
     MissingReturnInFunction(Rc<FuncSignature>),
     UnknownFuncReference(String),
+    UnknownParamReference(usize),
+    StackOverflowError,
 }
 
 struct Variable {
@@ -25,39 +26,34 @@ struct Variable {
     constant: bool,
 }
 
-pub struct Scope<'a> {
+pub struct Scope {
     writer: Rc<RefCell<dyn std::io::Write>>,
-    parent: Option<Box<&'a Scope<'a>>>,
     locals: HashMap<String, Value>,
+    stack: Vec<Value>,
+    stack_offsets: Vec<usize>,
     constants: HashSet<String>,
 }
 
-impl<'a> Scope<'a> {
-    fn new_stdout() -> Scope<'a> {
+impl Scope {
+    fn new_stdout() -> Scope {
         Self::new(Rc::new(RefCell::new(std::io::stdout())))
     }
 
-    fn new_cursor() -> (Scope<'a>, Rc<RefCell<Cursor<Vec<u8>>>>) {
+    pub fn new_cursor() -> (Scope, Rc<RefCell<Cursor<Vec<u8>>>>) {
         let mut cursor = Cursor::new(Vec::new());
         let cell = Rc::new(RefCell::new(cursor));
         let cloned = Rc::clone(&cell);
         (Self::new(cell), cloned)
     }
 
-    fn new(writer: Rc<RefCell<dyn std::io::Write>>) -> Scope<'a> {
+    fn new(writer: Rc<RefCell<dyn std::io::Write>>) -> Scope {
         Scope {
             writer,
-            parent: None,
             locals: HashMap::new(),
+            stack: Vec::new(),
+            stack_offsets: Vec::new(),
             constants: HashSet::new(),
         }
-    }
-
-    fn child(&self) -> Scope {
-        let mut ch = Scope::new(Rc::clone(&self.writer));
-        ch.parent = Some(Box::new(self));
-
-        ch
     }
 
     fn set(&mut self, name: &str, val: Value, constant: bool) -> Result<(), EvalError> {
@@ -76,15 +72,56 @@ impl<'a> Scope<'a> {
 
     // TODO: don't use hash map to index variables
     fn get(&self, name: &str) -> Option<&Value> {
-        if let Some(val) = self.locals.get(name) {
-            return Some(val);
+        self.locals.get(name)
+    }
+
+    fn eval_func(&mut self, identifier: &String, args: &Vec<Expr>) -> Result<Value, EvalError> {
+        let Value::Function { signature, body } = self
+            .get(identifier)
+            // TODO no clone
+            .cloned()
+            .ok_or_else(|| EvalError::UnknownFuncReference(identifier.clone()))?
+        else {
+            // We type-checked before
+            unreachable!();
         };
 
-        if let Some(ref par) = self.parent {
-            return par.get(name);
-        };
+        const MAX_STACK_SIZE: usize = 100;
+        if self.stack_offsets.len() > MAX_STACK_SIZE {
+            return Err(EvalError::StackOverflowError);
+        }
+        for arg in args {
+            let val = arg.eval(self)?;
+            self.push(val);
+        }
 
-        None
+        self.stack_offsets.push(self.stack.len() - args.len());
+
+        for stmt in body {
+            if let StatementValue::Return(r) = stmt.eval(self)? {
+                self.end_func(&signature);
+                return Ok(r);
+            }
+        }
+        // TODO: validate at parse time
+        Err(EvalError::MissingReturnInFunction(Rc::clone(&signature)))
+    }
+
+    fn push(&mut self, val: Value) {
+        self.stack.push(val);
+    }
+
+    fn end_func(&mut self, signature: &FuncSignature) {
+        for _ in signature.args.iter() {
+            self.stack
+                .pop()
+                .expect("empty stack when popping at the end of function");
+        }
+        self.stack_offsets.pop().expect("non empty stack offsets");
+    }
+    fn param(&self, idx: usize) -> Option<&Value> {
+        self.stack
+            .get(idx + self.stack_offsets.last().unwrap_or(&(0 as usize)))
     }
 }
 
@@ -204,14 +241,14 @@ impl Value {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum StatementValue {
+pub enum StatementValue {
     Break,
     Return(Value),
     Empty,
 }
 
 impl Statement {
-    fn eval(&self, scope: &mut Scope) -> Result<StatementValue, EvalError> {
+    pub fn eval(&self, scope: &mut Scope) -> Result<StatementValue, EvalError> {
         match self {
             Statement::Expr(expr) => expr.eval(scope).map(|_| StatementValue::Empty),
             Statement::Assign {
@@ -268,7 +305,7 @@ impl Statement {
 
                 Ok(res)
             }
-            Statement::While { cond, statements } => 'outer: loop {
+            Statement::While { cond, statements } => loop {
                 let cond_val = cond.eval(scope)?;
                 if cond_val != Value::Bool(true) {
                     return Ok(StatementValue::Empty);
@@ -300,38 +337,18 @@ impl Expr {
                 Some(val) => Ok(val.clone()),
                 None => Err(EvalError::UnknownVariableReference(ident.to_string())),
             },
-            Expr::FuncCall { identifier, args } => {
-                // TODO use a stack for arguments instead of referencing them via the scope
-                let Value::Function { signature, body } = scope
-                    .get(identifier)
-                    .ok_or_else(|| EvalError::UnknownFuncReference(identifier.clone()))?
-                else {
-                    // We type-checked before
-                    unreachable!();
-                };
-
-                let mut scope = scope.child();
-
-                for (arg, (name, _)) in args.iter().zip(signature.args.iter()) {
-                    let val = arg.eval(&mut scope)?;
-                    scope.set(name, val, false)?;
-                }
-
-                for stmt in body {
-                    if let StatementValue::Return(r) = stmt.eval(&mut scope)? {
-                        return Ok(r);
-                    }
-                }
-
-                // TODO: validate at parse time
-                Err(EvalError::MissingReturnInFunction(Rc::clone(signature)))
-            }
+            Expr::FuncCall { identifier, args } => scope.eval_func(identifier, args),
             Expr::Assign { identifier, expr } => {
                 let val = expr.eval(scope)?;
                 // TODO: no clone
                 scope.set(identifier, val.clone(), false)?;
                 Ok(val)
             }
+            // TODO: don't clone
+            Expr::Param(idx) => match scope.param(*idx) {
+                Some(v) => Ok(v.clone()),
+                None => Err(EvalError::UnknownParamReference(*idx)),
+            },
         }
     }
 }
@@ -654,7 +671,7 @@ mod test {
             let statement = res.expect("Expected no error while parsing");
             statement
                 .eval(&mut scope)
-                .expect("Expected no error while evaluating");
+                .expect(format!("Expected no error while evaluating: {}", code).as_str());
         }
         let raw = cursor.as_ref().borrow().get_ref().clone();
         let encoded = String::from_utf8(raw);
@@ -665,6 +682,21 @@ mod test {
     #[test]
     fn test_with_print() {
         for (code, expect) in vec![
+            (
+                "const fibo = func(n int) -> int {
+                                if n == 0 {
+                                    return 0;
+                                } elif n == 1 {
+                                    return 1;
+                                } else {
+                                    return fibo(n-1) + fibo(n-2);
+                                }
+                            };
+                            println fibo(10);
+                            print fibo(20);",
+                "55
+6765",
+            ),
             ("print 5 * 4;", "20"),
             ("print true + false;", "true"),
             ("print true * false;", "false"),
@@ -675,29 +707,14 @@ mod test {
                 "11",
             ),
             (
-                "const fibo = func(n int) -> int {
-                    if n == 0 {
-                        return 0;
-                    } elif n == 1 {
-                        return 1;
-                    } else {
-                        return fibo(n-1) + fibo(n-2);
-                    }
-                };
-                println fibo(10);
-                print fibo(20);",
-                "55
-6765",
-            ),
-            (
                 "const fact = func(n int) -> int {
-                    if n < 2 {
-                        return 1;
-                    }
+                                if n < 2 {
+                                    return 1;
+                                }
 
-                    return n * fact(n-1);
-                };
-                print fact(10);",
+                                return n * fact(n-1);
+                            };
+                            print fact(10);",
                 "3628800",
             ),
             (

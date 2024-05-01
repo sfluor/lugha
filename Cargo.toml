@@ -6,3 +6,16 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+
+[dev-dependencies]
+criterion = "0.5"
+pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
+
+[[bench]]
+name = "eval"
+harness = false
+
+[profile.release]
+# This is useful when profiling, because lets the tools include your
+# function names in the profiling reports.
+debug = true
