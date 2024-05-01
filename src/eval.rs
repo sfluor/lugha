@@ -1,10 +1,9 @@
+use crate::lexer::Float;
+use crate::parser::*;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
-
-use crate::lexer::Float;
-use crate::parser::*;
 
 const NEWLINE_VEC: [u8; 1] = [b'\n'];
 
@@ -19,6 +18,7 @@ pub enum EvalError {
     MissingReturnInFunction(Rc<FuncSignature>),
     UnknownFuncReference(String),
     UnknownParamReference(usize),
+    StackOverflowError,
 }
 
 struct Variable {
@@ -86,6 +86,10 @@ impl Scope {
             unreachable!();
         };
 
+        const MAX_STACK_SIZE: usize = 100;
+        if self.stack_offsets.len() > MAX_STACK_SIZE {
+            return Err(EvalError::StackOverflowError);
+        }
         for arg in args {
             let val = arg.eval(self)?;
             self.push(val);
@@ -95,6 +99,7 @@ impl Scope {
 
         for stmt in body {
             if let StatementValue::Return(r) = stmt.eval(self)? {
+                self.end_func(&signature);
                 return Ok(r);
             }
         }
@@ -105,6 +110,7 @@ impl Scope {
     fn push(&mut self, val: Value) {
         self.stack.push(val);
     }
+
     fn end_func(&mut self, signature: &FuncSignature) {
         for _ in signature.args.iter() {
             self.stack
@@ -676,6 +682,21 @@ mod test {
     #[test]
     fn test_with_print() {
         for (code, expect) in vec![
+            (
+                "const fibo = func(n int) -> int {
+                                if n == 0 {
+                                    return 0;
+                                } elif n == 1 {
+                                    return 1;
+                                } else {
+                                    return fibo(n-1) + fibo(n-2);
+                                }
+                            };
+                            println fibo(10);
+                            print fibo(20);",
+                "55
+6765",
+            ),
             ("print 5 * 4;", "20"),
             ("print true + false;", "true"),
             ("print true * false;", "false"),
@@ -685,21 +706,6 @@ mod test {
                 print x-1;",
                 "11",
             ),
-            // (
-            //     "const fibo = func(n int) -> int {
-            //                     if n == 0 {
-            //                         return 0;
-            //                     } elif n == 1 {
-            //                         return 1;
-            //                     } else {
-            //                         return fibo(n-1) + fibo(n-2);
-            //                     }
-            //                 };
-            //                 println fibo(10);
-            //                 print fibo(20);",
-            //     "55
-            // 6765",
-            // ),
             (
                 "const fact = func(n int) -> int {
                                 if n < 2 {
