@@ -1,8 +1,10 @@
 use crate::lexer::Float;
 use crate::parser::*;
+use std::borrow::BorrowMut;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
+use std::ops::Deref;
 use std::rc::Rc;
 
 const NEWLINE_VEC: [u8; 1] = [b'\n'];
@@ -28,7 +30,7 @@ struct Variable {
 
 pub struct Scope {
     writer: Rc<RefCell<dyn std::io::Write>>,
-    locals: HashMap<String, Value>,
+    locals: HashMap<String, Rc<RefCell<Value>>>,
     stack: Vec<Value>,
     stack_offsets: Vec<usize>,
     constants: HashSet<String>,
@@ -65,26 +67,24 @@ impl Scope {
             self.constants.insert(name.to_string());
         }
 
-        self.locals.insert(name.to_string(), val);
+        self.locals
+            .insert(name.to_string(), Rc::new(RefCell::new(val)));
 
         Ok(())
     }
 
     // TODO: don't use hash map to index variables
-    fn get(&self, name: &str) -> Option<&Value> {
-        self.locals.get(name)
+    fn get(&self, name: &str) -> Option<Rc<RefCell<Value>>> {
+        self.locals.get(name).map(|rc| Rc::clone(rc))
     }
 
     fn eval_func(&mut self, identifier: &String, args: &Vec<Expr>) -> Result<Value, EvalError> {
-        let Value::Function { signature, body } = self
-            .get(identifier)
-            // TODO no clone
-            .cloned()
-            .ok_or_else(|| EvalError::UnknownFuncReference(identifier.clone()))?
-        else {
-            // We type-checked before
-            unreachable!();
+        let func = self.get(identifier);
+        if func.is_none() {
+            return Err(EvalError::UnknownFuncReference(identifier.clone()));
         };
+
+        let func = func.unwrap();
 
         const MAX_STACK_SIZE: usize = 100;
         if self.stack_offsets.len() > MAX_STACK_SIZE {
@@ -96,6 +96,15 @@ impl Scope {
         }
 
         self.stack_offsets.push(self.stack.len() - args.len());
+        let func = func.borrow();
+        let Value::Function {
+            ref signature,
+            ref body,
+        } = *func
+        else {
+            // We type checked before already;
+            unreachable!();
+        };
 
         for stmt in body {
             if let StatementValue::Return(r) = stmt.eval(self)? {
@@ -334,7 +343,7 @@ impl Expr {
             Expr::Literal(value) => Ok(value.clone()),
             Expr::Identifier(ident) => match scope.get(&ident) {
                 // TODO: don't clone
-                Some(val) => Ok(val.clone()),
+                Some(val) => Ok(val.borrow().clone()),
                 None => Err(EvalError::UnknownVariableReference(ident.to_string())),
             },
             Expr::FuncCall { identifier, args } => scope.eval_func(identifier, args),
