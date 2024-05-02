@@ -19,7 +19,7 @@ pub enum EvalError {
     WriteError,
     MissingReturnInFunction(Rc<FuncSignature>),
     UnknownFuncReference(String),
-    UnknownParamReference(usize),
+    UnknownIdentifier(String, usize),
     StackOverflowError,
 }
 
@@ -30,7 +30,6 @@ struct Variable {
 
 pub struct Scope {
     writer: Rc<RefCell<dyn std::io::Write>>,
-    locals: HashMap<String, Rc<RefCell<Value>>>,
     stack: Vec<Value>,
     stack_offsets: Vec<usize>,
     constants: HashSet<String>,
@@ -42,7 +41,7 @@ impl Scope {
     }
 
     pub fn new_cursor() -> (Scope, Rc<RefCell<Cursor<Vec<u8>>>>) {
-        let mut cursor = Cursor::new(Vec::new());
+        let cursor = Cursor::new(Vec::new());
         let cell = Rc::new(RefCell::new(cursor));
         let cloned = Rc::clone(&cell);
         (Self::new(cell), cloned)
@@ -51,40 +50,33 @@ impl Scope {
     fn new(writer: Rc<RefCell<dyn std::io::Write>>) -> Scope {
         Scope {
             writer,
-            locals: HashMap::new(),
             stack: Vec::new(),
             stack_offsets: Vec::new(),
             constants: HashSet::new(),
         }
     }
-
-    fn set(&mut self, name: &str, val: Value, constant: bool) -> Result<(), EvalError> {
-        if self.constants.contains(name) {
-            return Err(EvalError::OverridingConstant(name.to_string(), val));
-        }
-
-        if constant {
-            self.constants.insert(name.to_string());
-        }
-
-        self.locals
-            .insert(name.to_string(), Rc::new(RefCell::new(val)));
-
-        Ok(())
-    }
-
     // TODO: don't use hash map to index variables
-    fn get(&self, name: &str) -> Option<Rc<RefCell<Value>>> {
-        self.locals.get(name).map(|rc| Rc::clone(rc))
+    fn get(&self, ident: &Ident) -> Option<&Value> {
+        self.stack.get(ident.stack_idx)
     }
 
-    fn eval_func(&mut self, identifier: &String, args: &Vec<Expr>) -> Result<Value, EvalError> {
+    fn eval_func(&mut self, identifier: &Ident, args: &Vec<Expr>) -> Result<Value, EvalError> {
         let func = self.get(identifier);
         if func.is_none() {
-            return Err(EvalError::UnknownFuncReference(identifier.clone()));
+            return Err(EvalError::UnknownFuncReference(identifier.name.clone()));
         };
 
         let func = func.unwrap();
+        let Value::Function {
+            ref signature,
+            ref body,
+        } = *func
+        else {
+            // We type checked before already;
+            unreachable!();
+        };
+        let signature = Rc::clone(signature);
+        let body = Rc::clone(body);
 
         const MAX_STACK_SIZE: usize = 100;
         if self.stack_offsets.len() > MAX_STACK_SIZE {
@@ -96,17 +88,8 @@ impl Scope {
         }
 
         self.stack_offsets.push(self.stack.len() - args.len());
-        let func = func.borrow();
-        let Value::Function {
-            ref signature,
-            ref body,
-        } = *func
-        else {
-            // We type checked before already;
-            unreachable!();
-        };
 
-        for stmt in body {
+        for stmt in body.iter() {
             if let StatementValue::Return(r) = stmt.eval(self)? {
                 self.end_func(&signature);
                 return Ok(r);
@@ -128,9 +111,10 @@ impl Scope {
         }
         self.stack_offsets.pop().expect("non empty stack offsets");
     }
-    fn param(&self, idx: usize) -> Option<&Value> {
+
+    fn pull(&self, stack_idx: usize) -> Option<&Value> {
         self.stack
-            .get(idx + self.stack_offsets.last().unwrap_or(&(0 as usize)))
+            .get(stack_idx + self.stack_offsets.last().unwrap_or(&(0 as usize)))
     }
 }
 
@@ -166,6 +150,7 @@ impl Value {
                 signature: _,
                 body: _,
             } => Err(EvalError::UnimplementedBinaryOperator(self, op.clone())),
+
             Value::String(ref left) => {
                 let Value::String(right) = other else {
                     return Err(EvalError::BinTypeMismatch(self, other.clone()));
@@ -260,15 +245,10 @@ impl Statement {
     pub fn eval(&self, scope: &mut Scope) -> Result<StatementValue, EvalError> {
         match self {
             Statement::Expr(expr) => expr.eval(scope).map(|_| StatementValue::Empty),
-            Statement::Assign {
-                identifier,
-                expr,
-                typ,
-            } => {
+            Statement::Create { name, expr, typ } => {
                 let val = expr.eval(scope)?;
-                scope
-                    .set(identifier, val, *typ == AssignType::CreateConst)
-                    .map(|_| StatementValue::Empty)
+                scope.push(val);
+                Ok(StatementValue::Empty)
             }
             Statement::Conditional { branches, default } => {
                 for (expr, branch) in branches {
@@ -343,20 +323,24 @@ impl Expr {
             Expr::Literal(value) => Ok(value.clone()),
             Expr::Identifier(ident) => match scope.get(&ident) {
                 // TODO: don't clone
-                Some(val) => Ok(val.borrow().clone()),
-                None => Err(EvalError::UnknownVariableReference(ident.to_string())),
+                Some(val) => Ok(val.clone()),
+                None => Err(EvalError::UnknownVariableReference(ident.name.to_string())),
             },
             Expr::FuncCall { identifier, args } => scope.eval_func(identifier, args),
             Expr::Assign { identifier, expr } => {
                 let val = expr.eval(scope)?;
                 // TODO: no clone
-                scope.set(identifier, val.clone(), false)?;
+                scope.push(val.clone());
                 Ok(val)
             }
             // TODO: don't clone
-            Expr::Param(idx) => match scope.param(*idx) {
+            Expr::Identifier(Ident {
+                name,
+                stack_idx,
+                param,
+            }) => match scope.pull(*stack_idx) {
                 Some(v) => Ok(v.clone()),
-                None => Err(EvalError::UnknownParamReference(*idx)),
+                None => Err(EvalError::UnknownIdentifier(name.clone(), *stack_idx)),
             },
         }
     }
@@ -517,24 +501,24 @@ mod test {
         }
         "#;
         let expected_nodes: Vec<Statement> = vec![
-            Statement::Assign {
-                identifier: "x".to_string(),
+            Statement::Create {
+                name: "x".to_string(),
                 expr: float(4.1),
                 typ: AssignType::CreateVar,
             },
             Statement::Conditional {
                 branches: vec![
                     (
-                        BinOp::GT.of(ident("x"), float(1.0)),
+                        BinOp::GT.of(local("x", 0), float(1.0)),
                         vec![
                             Expr::Assign {
-                                identifier: "x".to_owned(),
-                                expr: BinOp::Add.of(ident("x"), float(0.1)).b(),
+                                identifier: i_local("x", 0),
+                                expr: BinOp::Add.of(local("x", 0), float(0.1)).b(),
                             }
                             .statement(),
                             Expr::Assign {
-                                identifier: "x".to_owned(),
-                                expr: BinOp::Mult.of(float(2.0), ident("x")).b(),
+                                identifier: i_local("x", 0),
+                                expr: BinOp::Mult.of(float(2.0), local("x", 0)).b(),
                             }
                             .statement(),
                         ],
@@ -542,7 +526,7 @@ mod test {
                     (
                         boolean(false),
                         vec![Expr::Assign {
-                            identifier: "x".to_owned(),
+                            identifier: i_local("x", 0),
                             expr: float(4.2).b(),
                         }
                         .statement()],
@@ -550,9 +534,9 @@ mod test {
                 ],
                 default: vec![Statement::Conditional {
                     branches: vec![(
-                        BinOp::LTEQ.of(ident("x"), float(10.0)),
+                        BinOp::LTEQ.of(local("x", 0), float(10.0)),
                         vec![Expr::Assign {
-                            identifier: "x".to_owned(),
+                            identifier: i_local("x", 0),
                             expr: float(1.1).b(),
                         }
                         .statement()],
@@ -583,34 +567,34 @@ mod test {
             BinOp::Add
                 .of(int(5), BinOp::Mult.of(int(3), UnaOp::Neg.of(int(1))))
                 .statement(),
-            Statement::Assign {
-                identifier: "x".to_string(),
+            Statement::Create {
+                name: "x".to_string(),
                 expr: float(5.1),
                 typ: AssignType::CreateConst,
             },
-            Statement::Assign {
-                identifier: "y".to_string(),
+            Statement::Create {
+                name: "y".to_string(),
                 expr: string("z"),
                 typ: AssignType::CreateVar,
             },
             BinOp::Div.of(int(10), int(2)).statement(),
             BinOp::Add.of(string("ab"), string("cd")).statement(),
-            BinOp::Add.of(ident("x"), float(2.0)).statement(),
-            Statement::Assign {
-                identifier: "z".to_string(),
+            BinOp::Add.of(local("x", 0), float(2.0)).statement(),
+            Statement::Create {
+                name: "z".to_string(),
                 expr: Expr::Assign {
-                    identifier: "y".to_string(),
-                    expr: BinOp::Add.of(ident("y"), string("a")).b(),
+                    identifier: i_local("y", 1),
+                    expr: BinOp::Add.of(local("y", 1), string("a")).b(),
                 },
                 typ: AssignType::CreateConst,
             },
-            ident("z").statement(),
+            local("z", 2).statement(),
             Statement::Print {
-                expr: ident("z"),
+                expr: local("z", 2),
                 newline: false,
             },
             Statement::Print {
-                expr: ident("z"),
+                expr: local("z", 2),
                 newline: true,
             },
             BinOp::EQ.of(int(1), int(6)).statement(),
@@ -673,11 +657,12 @@ mod test {
     }
 
     fn exec_and_get_stdout(code: &str) -> String {
-        let mut parser = Parser::from_str(code);
+        let parser = Parser::from_str(code);
         let (mut scope, cursor) = Scope::new_cursor();
 
         for res in parser {
-            let statement = res.expect("Expected no error while parsing");
+            let statement =
+                res.expect(format!("Expected no error while parsing code: {}", code).as_str()));
             statement
                 .eval(&mut scope)
                 .expect(format!("Expected no error while evaluating: {}", code).as_str());
@@ -769,6 +754,7 @@ breaking
     }
 }
 
+// TODO test variable shadowing (reassigning same variable) + test it across different scopes
 // TODO a*b = 5 should fail
 // TODO disallow return inside loops
 // TODO disallow breaks outside loops
