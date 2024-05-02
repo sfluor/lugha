@@ -19,8 +19,8 @@ pub enum EvalError {
     WriteError,
     MissingReturnInFunction(Rc<FuncSignature>),
     UnknownFuncReference(String),
-    UnknownIdentifier(String, usize),
     StackOverflowError,
+    UnknownIdentifier(Ident),
 }
 
 struct Variable {
@@ -32,7 +32,6 @@ pub struct Scope {
     writer: Rc<RefCell<dyn std::io::Write>>,
     stack: Vec<Value>,
     stack_offsets: Vec<usize>,
-    constants: HashSet<String>,
 }
 
 impl Scope {
@@ -52,12 +51,29 @@ impl Scope {
             writer,
             stack: Vec::new(),
             stack_offsets: Vec::new(),
-            constants: HashSet::new(),
         }
     }
     // TODO: don't use hash map to index variables
     fn get(&self, ident: &Ident) -> Option<&Value> {
-        self.stack.get(ident.stack_idx)
+        let offset = if ident.param {
+            self.stack_offsets.last().unwrap_or(&(0 as usize))
+        } else {
+            &0
+        };
+        self.stack.get(ident.stack_idx + offset)
+    }
+
+    fn replace(&mut self, ident: &Ident, val: Value) -> Result<(), EvalError> {
+        let offset = if ident.param {
+            self.stack_offsets.last().unwrap_or(&(0 as usize))
+        } else {
+            &0
+        };
+        *self
+            .stack
+            .get_mut(ident.stack_idx + offset)
+            .ok_or_else(|| EvalError::UnknownIdentifier(ident.clone()))? = val;
+        Ok(())
     }
 
     fn eval_func(&mut self, identifier: &Ident, args: &Vec<Expr>) -> Result<Value, EvalError> {
@@ -78,7 +94,7 @@ impl Scope {
         let signature = Rc::clone(signature);
         let body = Rc::clone(body);
 
-        const MAX_STACK_SIZE: usize = 100;
+        const MAX_STACK_SIZE: usize = 19;
         if self.stack_offsets.len() > MAX_STACK_SIZE {
             return Err(EvalError::StackOverflowError);
         }
@@ -91,7 +107,7 @@ impl Scope {
 
         for stmt in body.iter() {
             if let StatementValue::Return(r) = stmt.eval(self)? {
-                self.end_func(&signature);
+                self.end_func();
                 return Ok(r);
             }
         }
@@ -103,18 +119,13 @@ impl Scope {
         self.stack.push(val);
     }
 
-    fn end_func(&mut self, signature: &FuncSignature) {
-        for _ in signature.args.iter() {
+    fn end_func(&mut self) {
+        let start = self.stack_offsets.pop().expect("non empty stack offsets");
+        while self.stack.len() > start {
             self.stack
                 .pop()
                 .expect("empty stack when popping at the end of function");
         }
-        self.stack_offsets.pop().expect("non empty stack offsets");
-    }
-
-    fn pull(&self, stack_idx: usize) -> Option<&Value> {
-        self.stack
-            .get(stack_idx + self.stack_offsets.last().unwrap_or(&(0 as usize)))
     }
 }
 
@@ -321,26 +332,17 @@ impl Expr {
             Expr::Binary(left, op, right) => left.eval(scope)?.bin(&op, &right.eval(scope)?),
             Expr::Unary(op, node) => node.eval(scope)?.unary(&op),
             Expr::Literal(value) => Ok(value.clone()),
-            Expr::Identifier(ident) => match scope.get(&ident) {
-                // TODO: don't clone
-                Some(val) => Ok(val.clone()),
-                None => Err(EvalError::UnknownVariableReference(ident.name.to_string())),
-            },
             Expr::FuncCall { identifier, args } => scope.eval_func(identifier, args),
             Expr::Assign { identifier, expr } => {
                 let val = expr.eval(scope)?;
-                // TODO: no clone
-                scope.push(val.clone());
+                // TODO: don't clone
+                scope.replace(identifier, val.clone())?;
                 Ok(val)
             }
             // TODO: don't clone
-            Expr::Identifier(Ident {
-                name,
-                stack_idx,
-                param,
-            }) => match scope.pull(*stack_idx) {
+            Expr::Identifier(ident) => match scope.get(ident) {
                 Some(v) => Ok(v.clone()),
-                None => Err(EvalError::UnknownIdentifier(name.clone(), *stack_idx)),
+                None => Err(EvalError::UnknownIdentifier(ident.clone())),
             },
         }
     }
@@ -662,7 +664,7 @@ mod test {
 
         for res in parser {
             let statement =
-                res.expect(format!("Expected no error while parsing code: {}", code).as_str()));
+                res.expect(format!("Expected no error while parsing code: {}", code).as_str());
             statement
                 .eval(&mut scope)
                 .expect(format!("Expected no error while evaluating: {}", code).as_str());
@@ -740,12 +742,12 @@ breaking
             ),
             (
                 r#"
-                var x = "abc" + "d";
-                x = x + "e";
-                print x + "z";
-                print 55.123;
-                print x = x + "j";
-                "#,
+                            var x = "abc" + "d";
+                            x = x + "e";
+                            print x + "z";
+                            print 55.123;
+                            print x = x + "j";
+                            "#,
                 "abcdez55.123abcdej",
             ),
         ] {

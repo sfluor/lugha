@@ -508,6 +508,8 @@ pub enum ParserError {
         argname: String,
     },
     UnknownParamReference(usize),
+    StackPopExpectedVarName(String),
+    StackPopExpectedVarNameButGot(String, String),
 }
 
 #[derive(Debug)]
@@ -543,6 +545,34 @@ impl LocalsScope {
                 .pop();
             self.local_types.pop();
             self.is_constant.pop();
+        }
+    }
+
+    fn pop_local(&mut self, name: &str) -> Result<(), ParserError> {
+        self.local_types.pop();
+        self.is_constant.pop();
+        self.locals
+            .get_mut(name)
+            .expect("Expected variable to still exist")
+            .pop();
+        let last: Option<String> = self
+            .local_names
+            .last_mut()
+            .expect("non empty locals lists")
+            .pop();
+
+        match last {
+            Some(val) => {
+                if val != name {
+                    Err(ParserError::StackPopExpectedVarNameButGot(
+                        name.to_string(),
+                        val,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            None => Err(ParserError::StackPopExpectedVarName(name.to_string())),
         }
     }
 
@@ -869,17 +899,35 @@ impl Parser {
             return Some(Err(err));
         }
 
-        let val = match self.parse_new_expr() {
-            Some(res) => match res {
-                Ok(val) => val,
-                Err(err) => return Some(Err(err)),
-            },
-            None => {
-                return Some(Err(ParserError::UnterminatedAssignment(token)));
+        // For functions let's declare them in the scope to avoid recursive call from going crazy.
+        // If we don't do that while parsing the body of the function we might find references to the function name itself
+        // That wouldn't yet be present in the scope since we aren't done parsing it.
+
+        let val = match self.lexer.peek() {
+            Some(Ok(Token {
+                typ: TokenType::Keyword(KeywordType::Func),
+                ..
+            })) => {
+                self.lexer
+                    .next()
+                    .expect("not empty")
+                    .expect("no error since peek worked");
+                match self.parse_func(Some((name.clone(), typ == AssignType::CreateConst))) {
+                    Ok(val) => val,
+                    Err(err) => return Some(Err(err)),
+                }
             }
+            _ => match self.parse_new_expr() {
+                Some(res) => match res {
+                    Ok(val) => val,
+                    Err(err) => return Some(Err(err)),
+                },
+                None => {
+                    return Some(Err(ParserError::UnterminatedAssignment(token)));
+                }
+            },
         };
 
-        // TODO don't do this :cry:, we don't know the type yet here.
         Some(Ok(Statement::Create {
             name,
             expr: val,
@@ -959,6 +1007,10 @@ impl Parser {
             }
             _ => self.parse_new_expr().map(|r| r.map(Statement::Expr)),
         };
+
+        if let Some(Err(err)) = result {
+            return Some(Err(err));
+        }
 
         if expect_colon {
             if let Err(err) = self.consume(TokenType::Symbol(SymbolType::SemiColon)) {
@@ -1167,15 +1219,27 @@ impl Parser {
         Ok(FuncSignature { args, ret_type })
     }
 
-    fn parse_func(&mut self) -> Result<Expr, ParserError> {
-        let signature = self.parse_func_signature()?;
+    fn parse_func(&mut self, name_to_declare: Option<(String, bool)>) -> Result<Expr, ParserError> {
+        let signature = Rc::new(self.parse_func_signature()?);
+
+        name_to_declare.as_ref().inspect(|(name, constant)| {
+            self.scope.new_local(
+                name.clone(),
+                Type::Function(Rc::clone(&signature)),
+                *constant,
+            );
+        });
 
         self.scope.start_func(&signature);
         let body = self.parse_block().unwrap_or_else(|| Ok(vec![]))?;
         self.scope.end_func(&signature);
 
+        name_to_declare
+            .map(|(name, _)| self.scope.l.pop_local(&name))
+            .unwrap_or(Ok(()))?;
+
         Ok(Expr::Literal(Value::Function {
-            signature: Rc::new(signature),
+            signature,
             body: Rc::new(body),
         }))
     }
@@ -1192,7 +1256,7 @@ impl Parser {
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
             TokenType::Keyword(ref val) => match val {
-                KeywordType::Func => self.parse_func(),
+                KeywordType::Func => self.parse_func(None),
                 KeywordType::False => Ok(Expr::Literal(Value::Bool(false))),
                 KeywordType::True => Ok(Expr::Literal(Value::Bool(true))),
                 _ => Err(ParserError::InvalidPrefix(token)),
