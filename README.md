@@ -2,6 +2,8 @@
 
 A toy interpreter for a C like language to learn more about rust.
 
+Playground available here: https://sfluor.github.io/lugha/
+
 ## Dev commands
 
 Rebuilding the wasm modules with `wasm-pack build`

@@ -11,7 +11,17 @@
         browser.</noscript>
     <script src="./bootstrap.js"></script>
     <div id="container">
-        <textarea id="code-editor" rows="10" cols="100" placeholder="Enter your code here: print 5+3;"></textarea>
+        <textarea id="code-editor" rows="10" cols="100">
+const fibo = func(n int) -> int {
+    if n < 2 {
+        return n;
+    }
+
+    return fibo(n-1) + fibo (n-2);
+};
+
+println fibo(20);
+        </textarea>
         <button id="btn-runcode">run code</button>
         <pre id="code-output"></pre>
     </div>
@@ -21,6 +31,10 @@
     #container {
         display: flex;
         flex-direction: column;
+    }
+
+    .error {
+        color: red;
     }
 </style>
 

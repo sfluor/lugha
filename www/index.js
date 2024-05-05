@@ -10,7 +10,7 @@ function recurseText(element, result) {
   if (element.nodeName === "#text") {
     element.textContent
       .split(" ")
-     .filter((w) => w.length > 0)
+      .filter((w) => w.length > 0)
       .map((word) => {
         if (keywords.has(word)) {
           return `<b>${word}</b>`;
@@ -51,7 +51,11 @@ function syntaxColor(event) {
 
 function runcode() {
   console.log("running code", editor.value);
-  output.textContent = wasm.run(editor.value);
+  try {
+    output.innerHTML = wasm.run(editor.value);
+  } catch (error) {
+    output.innerHTML = `<span class="error">Evaluation error: ${error}</span>`;
+  }
 }
 
 editor.addEventListener("input", syntaxColor);
