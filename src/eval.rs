@@ -28,13 +28,6 @@ pub enum EvalError {
     InvalidNonUTF8Output(FromUtf8Error),
 }
 
-impl Into<JsValue> for EvalError {
-    fn into(self) -> JsValue {
-        // TODO: improve me
-        JsValue::from_str(format!("{self:?}").as_str())
-    }
-}
-
 struct Variable {
     val: Value,
     constant: bool,
@@ -365,12 +358,21 @@ enum ExecError {
     Eval(EvalError),
 }
 
-pub fn exec(code: &str) -> Result<String, EvalError> {
+pub fn parse(code: &str) -> Result<Vec<Statement>, EvalError> {
     let parser = Parser::from_str(code);
-    let (mut scope, cursor) = Scope::new_cursor();
 
+    let mut statements = Vec::new();
     for res in parser {
         let statement = res.map_err(|err| EvalError::Parsing(err))?;
+        statements.push(statement);
+    }
+
+    Ok(statements)
+}
+
+pub fn exec(code: &str) -> Result<String, EvalError> {
+    let (mut scope, cursor) = Scope::new_cursor();
+    for statement in parse(code)? {
         statement.eval(&mut scope)?;
     }
     let raw = cursor.as_ref().borrow().get_ref().clone();
