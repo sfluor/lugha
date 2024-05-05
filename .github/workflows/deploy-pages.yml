@@ -17,6 +17,8 @@ jobs:
       - run: cargo install wasm-pack
       - run: wasm-pack build
       - run: cd www && npm install && npm run build
+        env:
+          NODE_OPTIONS: "--openssl-legacy-provider" # otherwise webpack build isn't happy
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
