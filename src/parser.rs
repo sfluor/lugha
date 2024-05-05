@@ -66,7 +66,7 @@ pub enum Value {
     Bool(bool),
     Function {
         signature: Rc<FuncSignature>,
-        body: Vec<Statement>,
+        body: Rc<Vec<Statement>>,
     },
 }
 
@@ -82,17 +82,29 @@ impl Value {
             Value::Float(Float(f)) => write!(writer, "{f}"),
             Value::Integer(i) => write!(writer, "{i}"),
             Value::Bool(b) => write!(writer, "{b}"),
-            Value::Function { signature, body } => write!(writer, "{signature}"),
+            Value::Function { signature, body: _ } => write!(writer, "{signature}"),
         }
     }
 }
 
-pub fn ident(name: &str) -> Expr {
-    Expr::Identifier(name.to_owned())
+pub fn i_local(name: &str, stack_idx: usize) -> Ident {
+    Ident {
+        name: name.to_string(),
+        stack_idx,
+        param: false,
+    }
 }
 
-pub fn param(i: usize) -> Expr {
-    Expr::Param(i)
+pub fn local(name: &str, stack_idx: usize) -> Expr {
+    Expr::Identifier(i_local(name, stack_idx))
+}
+
+pub fn param(name: &str, stack_idx: usize) -> Expr {
+    Expr::Identifier(Ident {
+        name: name.to_string(),
+        stack_idx,
+        param: true,
+    })
 }
 
 pub fn boolean(b: bool) -> Expr {
@@ -149,10 +161,16 @@ pub enum Expr {
     Binary(BExpr, BinOp, BExpr),
     Unary(UnaOp, BExpr),
     Literal(Value),
-    Identifier(String),
-    Param(usize),
-    Assign { identifier: String, expr: BExpr },
-    FuncCall { identifier: String, args: Vec<Expr> },
+    Identifier(Ident),
+    Assign { identifier: Ident, expr: BExpr },
+    FuncCall { identifier: Ident, args: Vec<Expr> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ident {
+    pub name: String,
+    pub stack_idx: usize,
+    pub param: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,8 +188,8 @@ pub enum Statement {
     },
     Break,
     Return(Expr),
-    Assign {
-        identifier: String,
+    Create {
+        name: String,
         expr: Expr,
         typ: AssignType,
     },
@@ -190,8 +208,8 @@ impl Statement {
         match self {
             Statement::Expr(expr) => expr.type_check(scope),
             // TODO: also check that we don't override constants
-            Statement::Assign {
-                identifier,
+            Statement::Create {
+                name,
                 expr,
                 typ: assign_type,
             } => {
@@ -201,19 +219,15 @@ impl Statement {
                 let mut marked = false;
                 let constant = *assign_type == AssignType::CreateConst;
 
-                if let Expr::Literal(Value::Function { signature, body }) = expr {
-                    scope.mark(
-                        identifier.clone(),
-                        Type::Function(Rc::clone(signature)),
-                        constant,
-                    )?;
+                if let Expr::Literal(Value::Function { signature, body: _ }) = expr {
+                    scope.new_local(name.clone(), Type::Function(Rc::clone(signature)), constant);
                     marked = true;
                 };
 
                 let typ = expr.type_check(scope)?;
 
                 if !marked {
-                    scope.mark(identifier.clone(), typ.clone(), constant)?;
+                    scope.new_local(name.clone(), typ.clone(), constant);
                 }
                 Ok(typ)
             }
@@ -235,7 +249,7 @@ impl Statement {
 
                 Ok(Type::Statement)
             }
-            Statement::Print { expr, newline } => expr.type_check(scope),
+            Statement::Print { expr, newline: _ } => expr.type_check(scope),
             Statement::While { cond, statements } => {
                 cond.type_check(scope)?;
                 for s in statements {
@@ -245,12 +259,12 @@ impl Statement {
             }
             Statement::Break => Ok(Type::Statement),
             Statement::Return(expr) => {
-                let Some(_) = scope.return_type.last() else {
+                let Some(_) = scope.p.return_type.last() else {
                     return Err(ParserError::InvalidReturnOutsideFunction(expr.clone()));
                 };
 
                 let typ = expr.type_check(scope)?;
-                let expected = scope.return_type.last().unwrap();
+                let expected = scope.p.return_type.last().unwrap();
                 if *expected != typ {
                     return Err(ParserError::InvalidReturnType {
                         expected: expected.clone(),
@@ -331,7 +345,7 @@ impl Expr {
                 Value::Bool(_) => Type::Boolean,
                 Value::Function { signature, body } => {
                     scope.start_func(signature);
-                    for s in body {
+                    for s in body.iter() {
                         s.type_check(scope)?;
                     }
                     scope.end_func(signature);
@@ -339,20 +353,35 @@ impl Expr {
                     Type::Function(Rc::clone(signature))
                 }
             }),
-            Expr::Identifier(ident) => scope.get(ident).cloned(),
-            Expr::Assign { identifier, expr } => {
-                scope.can_be_assigned(identifier, expr)?;
+            Expr::Assign {
+                identifier:
+                    Ident {
+                        name,
+                        stack_idx: _,
+                        param: _,
+                    },
+                expr,
+            } => {
+                scope.can_be_assigned(name, expr)?;
                 expr.type_check(scope)
             }
-            Expr::FuncCall { identifier, args } => {
-                let typ = scope.get(identifier)?.clone();
+            Expr::FuncCall {
+                identifier:
+                    Ident {
+                        name: func_name,
+                        stack_idx: _,
+                        param: _,
+                    },
+                args,
+            } => {
+                let typ = scope.get_type(func_name)?.clone();
                 let Type::Function(signature) = typ else {
-                    return Err(ParserError::InvalidFunc(identifier.clone(), typ.clone()));
+                    return Err(ParserError::InvalidFunc(func_name.clone(), typ.clone()));
                 };
 
                 if signature.args.len() != args.len() {
                     return Err(ParserError::InvalidFuncArgsNumber {
-                        func: identifier.clone(),
+                        func: func_name.clone(),
                         expected: Rc::clone(&signature),
                         got: args.clone(),
                     });
@@ -364,7 +393,7 @@ impl Expr {
                     let argtype = arg.type_check(scope)?;
                     if argtype != *expected {
                         return Err(ParserError::InvalidArgType {
-                            func: identifier.clone(),
+                            func: func_name.clone(),
                             argidx: idx,
                             argname: name.clone(),
                             expected: expected.clone(),
@@ -376,10 +405,7 @@ impl Expr {
 
                 Ok(signature.ret_type.clone())
             }
-            Expr::Param(idx) => match scope.param_types.get(*idx) {
-                Some(v) => Ok(v.clone()),
-                None => Err(ParserError::UnknownParamReference(*idx)),
-            },
+            Expr::Identifier(ident) => scope.get(&ident).cloned(),
         }
     }
 }
@@ -482,24 +508,144 @@ pub enum ParserError {
         argname: String,
     },
     UnknownParamReference(usize),
+    StackPopExpectedVarName(String),
+    StackPopExpectedVarNameButGot(String, String),
 }
 
 #[derive(Debug)]
-struct ParserScope {
-    var_types: HashMap<String, Type>,
-    constants: HashSet<String>,
-    // vec to allow shadowing variable references
+struct LocalsScope {
+    // the values are vec to allow shadowing variable references
+    locals: HashMap<String, Vec<usize>>,
+    // Each vector is a new scope.
+    local_names: Vec<Vec<String>>,
+    local_types: Vec<Type>,
+    is_constant: Vec<bool>,
+}
+
+impl LocalsScope {
+    fn new() -> LocalsScope {
+        LocalsScope {
+            locals: HashMap::new(),
+            local_names: vec![Vec::new()],
+            local_types: Vec::new(),
+            is_constant: Vec::new(),
+        }
+    }
+
+    fn start_func(&mut self) {
+        self.local_names.push(Vec::new());
+    }
+
+    fn end_func(&mut self) {
+        let locals: Option<Vec<String>> = self.local_names.pop();
+        for name in locals.iter().flat_map(|v| v.iter()) {
+            self.locals
+                .get_mut(name)
+                .expect("Expected variable to still exist")
+                .pop();
+            self.local_types.pop();
+            self.is_constant.pop();
+        }
+    }
+
+    fn pop_local(&mut self, name: &str) -> Result<(), ParserError> {
+        self.local_types.pop();
+        self.is_constant.pop();
+        self.locals
+            .get_mut(name)
+            .expect("Expected variable to still exist")
+            .pop();
+        let last: Option<String> = self
+            .local_names
+            .last_mut()
+            .expect("non empty locals lists")
+            .pop();
+
+        match last {
+            Some(val) => {
+                if val != name {
+                    Err(ParserError::StackPopExpectedVarNameButGot(
+                        name.to_string(),
+                        val,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            None => Err(ParserError::StackPopExpectedVarName(name.to_string())),
+        }
+    }
+
+    fn new_local(&mut self, name: String, typ: Type, constant: bool) -> Ident {
+        let idx = self.local_types.len();
+        self.locals
+            .entry(name.clone())
+            .or_insert_with(|| Vec::new())
+            .push(idx);
+        self.local_names
+            .last_mut()
+            .expect("no local names scope present")
+            .push(name.clone());
+        self.local_types.push(typ);
+        self.is_constant.push(constant);
+
+        Ident {
+            name,
+            stack_idx: idx,
+            param: false,
+        }
+    }
+
+    fn get_idx(&self, name: &str) -> Option<&usize> {
+        self.locals.get(name).and_then(|vec| vec.last())
+    }
+
+    fn get_type(&self, name: &str) -> Option<&Type> {
+        self.get_idx(name)
+            .and_then(|&idx| self.local_types.get(idx))
+    }
+
+    fn can_be_assigned(&self, identifier: &str, expr: &Expr) -> Result<(), ParserError> {
+        match self
+            .get_idx(identifier)
+            .and_then(|&idx| self.is_constant.get(idx))
+        {
+            Some(true) => Err(ParserError::InvalidAssignmentToConst(
+                identifier.to_string(),
+                expr.clone(),
+            )),
+            Some(false) => Ok(()),
+            None => Err(ParserError::UnknownVariable(identifier.to_string())),
+        }
+    }
+
+    fn by_name(&self, name: &str) -> Option<Expr> {
+        self.get_idx(name).map(|&idx| {
+            Expr::Identifier(Ident {
+                name: name.to_string(),
+                stack_idx: idx,
+                param: false,
+            })
+        })
+    }
+
+    fn get_type_by_idx(&self, stack_idx: usize) -> Option<&Type> {
+        self.local_types.get(stack_idx)
+    }
+}
+
+#[derive(Debug)]
+struct ParamsScope {
     params: HashMap<String, Vec<usize>>,
     param_types: Vec<Type>,
     // The expected return types of the current function if we are in a function.
     return_type: Vec<Type>,
 }
 
-impl ParserScope {
-    fn new() -> ParserScope {
-        ParserScope {
-            var_types: HashMap::new(),
-            constants: HashSet::new(),
+// TODO: merge with LocalScope
+impl ParamsScope {
+    fn new() -> ParamsScope {
+        ParamsScope {
             params: HashMap::new(),
             param_types: Vec::new(),
             return_type: Vec::new(),
@@ -507,7 +653,6 @@ impl ParserScope {
     }
 
     fn start_func(&mut self, signature: &FuncSignature) {
-        // TODO no clone
         self.return_type.push(signature.ret_type.clone());
         for (name, typ) in signature.args.iter() {
             self.params
@@ -531,43 +676,84 @@ impl ParserScope {
         self.return_type.pop();
     }
 
-    fn mark(&mut self, name: String, typ: Type, constant: bool) -> Result<(), ParserError> {
-        match self.var_types.insert(name.clone(), typ.clone()) {
-            None => {
-                if constant {
-                    self.constants.insert(name);
-                }
-                Ok(())
-            }
-            Some(val) => Err(ParserError::DuplicateVariableType(name, val, typ)),
+    fn get_idx(&self, name: &str) -> Option<&usize> {
+        self.params.get(name).and_then(|v| v.last())
+    }
+
+    fn get_type(&self, name: &str) -> Option<&Type> {
+        self.get_idx(name)
+            .and_then(|&idx| self.param_types.get(idx))
+    }
+
+    fn get_type_by_idx(&self, idx: usize) -> Option<&Type> {
+        self.param_types.get(idx)
+    }
+
+    fn by_name(&self, name: &str) -> Option<Expr> {
+        self.get_idx(name).map(|&idx| {
+            Expr::Identifier(Ident {
+                name: name.to_string(),
+                stack_idx: idx,
+                param: true,
+            })
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ParserScope {
+    l: LocalsScope,
+    p: ParamsScope,
+}
+
+impl ParserScope {
+    fn new() -> ParserScope {
+        ParserScope {
+            l: LocalsScope::new(),
+            p: ParamsScope::new(),
         }
     }
 
-    // TODO: don't use hash map to index variables
-    fn get(&self, name: &str) -> Result<&Type, ParserError> {
-        if let Some(val) = self.var_types.get(name) {
-            return Ok(val);
-        };
+    fn start_func(&mut self, signature: &FuncSignature) {
+        self.l.start_func();
+        self.p.start_func(signature);
+    }
 
-        if let Some(idxs) = self.params.get(name) {
-            return idxs
-                .last()
-                .ok_or(ParserError::UnknownVariable(name.to_string()))
-                .map(|x| &self.param_types[*x]);
-        };
+    fn end_func(&mut self, signature: &FuncSignature) {
+        self.l.end_func();
+        self.p.end_func(signature);
+    }
 
-        Err(ParserError::UnknownVariable(name.to_string()))
+    fn new_local(&mut self, name: String, typ: Type, constant: bool) -> Ident {
+        self.l.new_local(name, typ, constant)
+    }
+
+    fn by_name(&self, name: &str) -> Result<Expr, ParserError> {
+        self.l
+            .by_name(name)
+            .or_else(|| self.p.by_name(name))
+            .ok_or_else(|| ParserError::UnknownVariable(name.to_string()))
+    }
+
+    fn get(&self, ident: &Ident) -> Result<&Type, ParserError> {
+        if ident.param {
+            // TODO we could use ident.stack_idx
+            self.p.get_type_by_idx(ident.stack_idx)
+        } else {
+            self.l.get_type_by_idx(ident.stack_idx)
+        }
+        .ok_or_else(|| ParserError::UnknownVariable(ident.name.to_string()))
+    }
+
+    fn get_type(&self, name: &str) -> Result<&Type, ParserError> {
+        self.l
+            .get_type(name)
+            .or_else(|| self.p.get_type(name))
+            .ok_or_else(|| ParserError::UnknownVariable(name.to_string()))
     }
 
     fn can_be_assigned(&self, identifier: &str, expr: &Expr) -> Result<(), ParserError> {
-        if self.constants.contains(identifier) {
-            return Err(ParserError::InvalidAssignmentToConst(
-                identifier.to_string(),
-                expr.clone(),
-            ));
-        }
-
-        Ok(())
+        self.l.can_be_assigned(identifier, expr)
     }
 }
 
@@ -705,7 +891,7 @@ impl Parser {
 
     fn parse_assignment(
         &mut self,
-        identifier: String,
+        name: String,
         typ: AssignType,
         token: Token,
     ) -> Option<Result<Statement, ParserError>> {
@@ -713,18 +899,37 @@ impl Parser {
             return Some(Err(err));
         }
 
-        let val = match self.parse_new_expr() {
-            Some(res) => match res {
-                Ok(val) => val,
-                Err(err) => return Some(Err(err)),
-            },
-            None => {
-                return Some(Err(ParserError::UnterminatedAssignment(token)));
+        // For functions let's declare them in the scope to avoid recursive call from going crazy.
+        // If we don't do that while parsing the body of the function we might find references to the function name itself
+        // That wouldn't yet be present in the scope since we aren't done parsing it.
+
+        let val = match self.lexer.peek() {
+            Some(Ok(Token {
+                typ: TokenType::Keyword(KeywordType::Func),
+                ..
+            })) => {
+                self.lexer
+                    .next()
+                    .expect("not empty")
+                    .expect("no error since peek worked");
+                match self.parse_func(Some((name.clone(), typ == AssignType::CreateConst))) {
+                    Ok(val) => val,
+                    Err(err) => return Some(Err(err)),
+                }
             }
+            _ => match self.parse_new_expr() {
+                Some(res) => match res {
+                    Ok(val) => val,
+                    Err(err) => return Some(Err(err)),
+                },
+                None => {
+                    return Some(Err(ParserError::UnterminatedAssignment(token)));
+                }
+            },
         };
 
-        Some(Ok(Statement::Assign {
-            identifier,
+        Some(Ok(Statement::Create {
+            name,
             expr: val,
             typ,
         }))
@@ -803,6 +1008,10 @@ impl Parser {
             _ => self.parse_new_expr().map(|r| r.map(Statement::Expr)),
         };
 
+        if let Some(Err(err)) = result {
+            return Some(Err(err));
+        }
+
         if expect_colon {
             if let Err(err) = self.consume(TokenType::Symbol(SymbolType::SemiColon)) {
                 return Some(Err(err));
@@ -816,7 +1025,7 @@ impl Parser {
         // TODO: we could support inline function declarations and call
         // (func () -> int)()
         // by removing this identifier restriction
-        let Expr::Identifier(name) = left else {
+        let Expr::Identifier(ident) = left else {
             return Err(ParserError::InvalidFuncCall(left));
         };
 
@@ -836,7 +1045,7 @@ impl Parser {
 
         // TODO resolve the func now
         Ok(Expr::FuncCall {
-            identifier: name,
+            identifier: ident,
             args,
         })
     }
@@ -1010,16 +1219,28 @@ impl Parser {
         Ok(FuncSignature { args, ret_type })
     }
 
-    fn parse_func(&mut self) -> Result<Expr, ParserError> {
-        let signature = self.parse_func_signature()?;
+    fn parse_func(&mut self, name_to_declare: Option<(String, bool)>) -> Result<Expr, ParserError> {
+        let signature = Rc::new(self.parse_func_signature()?);
+
+        name_to_declare.as_ref().inspect(|(name, constant)| {
+            self.scope.new_local(
+                name.clone(),
+                Type::Function(Rc::clone(&signature)),
+                *constant,
+            );
+        });
 
         self.scope.start_func(&signature);
         let body = self.parse_block().unwrap_or_else(|| Ok(vec![]))?;
         self.scope.end_func(&signature);
 
+        name_to_declare
+            .map(|(name, _)| self.scope.l.pop_local(&name))
+            .unwrap_or(Ok(()))?;
+
         Ok(Expr::Literal(Value::Function {
-            signature: Rc::new(signature),
-            body,
+            signature,
+            body: Rc::new(body),
         }))
     }
 
@@ -1035,18 +1256,12 @@ impl Parser {
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
             TokenType::Keyword(ref val) => match val {
-                KeywordType::Func => self.parse_func(),
+                KeywordType::Func => self.parse_func(None),
                 KeywordType::False => Ok(Expr::Literal(Value::Bool(false))),
                 KeywordType::True => Ok(Expr::Literal(Value::Bool(true))),
                 _ => Err(ParserError::InvalidPrefix(token)),
             },
-            TokenType::Identifier(identifier) => Ok(match self.scope.params.get(&identifier) {
-                Some(idxs) => idxs
-                    .last()
-                    .map(|idx| Expr::Param(*idx))
-                    .unwrap_or(Expr::Identifier(identifier)),
-                None => Expr::Identifier(identifier),
-            }),
+            TokenType::Identifier(identifier) => self.scope.by_name(&identifier),
         }
     }
 
@@ -1236,18 +1451,18 @@ mod test {
         );
 
         let expected_stmts = vec![
-            Statement::Assign {
-                identifier: "x".to_string(),
+            Statement::Create {
+                name: "x".to_string(),
                 expr: int(10),
                 typ: AssignType::CreateConst,
             },
-            Statement::Assign {
-                identifier: "y".to_string(),
-                expr: ident("x"),
+            Statement::Create {
+                name: "y".to_string(),
+                expr: local("x", 0),
                 typ: AssignType::CreateConst,
             },
-            Statement::Assign {
-                identifier: "z".to_string(),
+            Statement::Create {
+                name: "z".to_string(),
                 expr: BinOp::Add.of(string("a"), string("b")),
                 typ: AssignType::CreateConst,
             },
@@ -1291,8 +1506,14 @@ mod test {
                 ParserError::BinTypeError {
                     left: Type::Integer,
                     right: Type::Float,
-                    expr: BinOp::Add.of(param(0), float(1.0)),
+                    expr: BinOp::Add.of(param("a", 0), float(1.0)),
                 },
+            ),
+            (
+                r#"const x = 0;
+                   const x = 1;
+                   x = 2;"#,
+                ParserError::InvalidAssignmentToConst("x".to_owned(), int(2)),
             ),
             (
                 r#"const fx = func() -> int {
@@ -1356,11 +1577,11 @@ mod test {
                 r"const fx = func() -> int {
                     return 1;
                 };",
-                vec![Statement::Assign {
-                    identifier: "fx".to_owned(),
+                vec![Statement::Create {
+                    name: "fx".to_owned(),
                     expr: Expr::Literal(Value::Function {
                         signature: Rc::clone(&signature_empty),
-                        body: vec![Statement::Return(int(1))],
+                        body: Rc::new(vec![Statement::Return(int(1))]),
                     }),
                     typ: AssignType::CreateConst,
                 }],
@@ -1371,17 +1592,19 @@ mod test {
                         return a + 1;
                     };
                 };",
-                vec![Statement::Assign {
-                    identifier: "fx".to_owned(),
+                vec![Statement::Create {
+                    name: "fx".to_owned(),
                     expr: Expr::Literal(Value::Function {
                         signature: Rc::clone(&signature_of_func),
-                        body: vec![Statement::Return(
+                        body: Rc::new(vec![Statement::Return(
                             Value::Function {
                                 signature: Rc::clone(&signature_empty),
-                                body: vec![Statement::Return(BinOp::Add.of(param(0), int(1)))],
+                                body: Rc::new(vec![Statement::Return(
+                                    BinOp::Add.of(param("a", 0), int(1)),
+                                )]),
                             }
                             .ex(),
-                        )],
+                        )]),
                     }),
                     typ: AssignType::CreateConst,
                 }],
@@ -1395,17 +1618,19 @@ mod test {
                 }
             };
             "#,
-                vec![Statement::Assign {
-                    identifier: "f".to_owned(),
+                vec![Statement::Create {
+                    name: "f".to_owned(),
                     expr: Expr::Literal(Value::Function {
                         signature: Rc::clone(&signature),
-                        body: vec![Statement::Conditional {
+                        body: Rc::new(vec![Statement::Conditional {
                             branches: vec![(
-                                BinOp::GT.of(param(2), float(1.0)),
-                                vec![Statement::Return(param(2))],
+                                BinOp::GT.of(param("b", 2), float(1.0)),
+                                vec![Statement::Return(param("b", 2))],
                             )],
-                            default: vec![Statement::Return(BinOp::Sub.of(param(2), float(4.3)))],
-                        }],
+                            default: vec![Statement::Return(
+                                BinOp::Sub.of(param("b", 2), float(4.3)),
+                            )],
+                        }]),
                     }),
                     typ: AssignType::CreateConst,
                 }],
