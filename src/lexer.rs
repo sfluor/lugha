@@ -1,5 +1,28 @@
 use std::{collections::HashMap, iter::Iterator, num::ParseIntError, thread};
 
+pub static KEYWORDS: [(&str, KeywordType); 20] = [
+    ("or", KeywordType::Or),
+    ("and", KeywordType::And),
+    ("for", KeywordType::For),
+    ("while", KeywordType::While),
+    ("const", KeywordType::Const),
+    ("var", KeywordType::Var),
+    ("true", KeywordType::True),
+    ("false", KeywordType::False),
+    ("if", KeywordType::If),
+    ("print", KeywordType::Print),
+    ("println", KeywordType::Println),
+    ("else", KeywordType::Else),
+    ("elif", KeywordType::Elif),
+    ("break", KeywordType::Break),
+    ("return", KeywordType::Return),
+    ("func", KeywordType::Func),
+    ("int", KeywordType::Int),
+    ("string", KeywordType::String),
+    ("float", KeywordType::Float),
+    ("bool", KeywordType::Bool),
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
     pub typ: TokenType,
@@ -222,28 +245,7 @@ impl Lexer {
             line: 0,
             pos: 0,
             // TODO: could be a static variable
-            keywords: HashMap::from_iter(vec![
-                ("or", KeywordType::Or),
-                ("and", KeywordType::And),
-                ("for", KeywordType::For),
-                ("while", KeywordType::While),
-                ("const", KeywordType::Const),
-                ("var", KeywordType::Var),
-                ("true", KeywordType::True),
-                ("false", KeywordType::False),
-                ("if", KeywordType::If),
-                ("print", KeywordType::Print),
-                ("println", KeywordType::Println),
-                ("else", KeywordType::Else),
-                ("elif", KeywordType::Elif),
-                ("break", KeywordType::Break),
-                ("return", KeywordType::Return),
-                ("func", KeywordType::Func),
-                ("int", KeywordType::Int),
-                ("string", KeywordType::String),
-                ("float", KeywordType::Float),
-                ("bool", KeywordType::Bool),
-            ]),
+            keywords: HashMap::from_iter(KEYWORDS.clone()),
         }
     }
 

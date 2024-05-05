@@ -1,3 +1,5 @@
+use wasm_bindgen::JsValue;
+
 use crate::lexer::Float;
 use crate::parser::*;
 use std::borrow::BorrowMut;
@@ -6,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::ops::Deref;
 use std::rc::Rc;
+use std::string::FromUtf8Error;
 
 const NEWLINE_VEC: [u8; 1] = [b'\n'];
 
@@ -21,6 +24,15 @@ pub enum EvalError {
     UnknownFuncReference(String),
     StackOverflowError,
     UnknownIdentifier(Ident),
+    Parsing(ParserError),
+    InvalidNonUTF8Output(FromUtf8Error),
+}
+
+impl Into<JsValue> for EvalError {
+    fn into(self) -> JsValue {
+        // TODO: improve me
+        JsValue::from_str(format!("{self:?}").as_str())
+    }
 }
 
 struct Variable {
@@ -348,6 +360,29 @@ impl Expr {
     }
 }
 
+enum ExecError {
+    Parsing(ParserError),
+    Eval(EvalError),
+}
+
+pub fn exec(code: &str) -> Result<String, EvalError> {
+    let parser = Parser::from_str(code);
+    let (mut scope, cursor) = Scope::new_cursor();
+
+    for res in parser {
+        let statement = res.map_err(|err| EvalError::Parsing(err))?;
+        statement.eval(&mut scope)?;
+    }
+    let raw = cursor.as_ref().borrow().get_ref().clone();
+    let encoded = String::from_utf8(raw);
+
+    encoded.map_err(|err| EvalError::InvalidNonUTF8Output(err))
+}
+
+pub fn exec_and_get_stdout(code: &str) -> String {
+    exec(code).expect("No failure")
+}
+
 mod test {
     use std::borrow::Borrow;
 
@@ -656,23 +691,6 @@ mod test {
 
         assert_eq!(parser.parse_new_expr(), None);
         assert_eq!(parser.parse_new_expr(), None);
-    }
-
-    fn exec_and_get_stdout(code: &str) -> String {
-        let parser = Parser::from_str(code);
-        let (mut scope, cursor) = Scope::new_cursor();
-
-        for res in parser {
-            let statement =
-                res.expect(format!("Expected no error while parsing code: {}", code).as_str());
-            statement
-                .eval(&mut scope)
-                .expect(format!("Expected no error while evaluating: {}", code).as_str());
-        }
-        let raw = cursor.as_ref().borrow().get_ref().clone();
-        let encoded = String::from_utf8(raw);
-
-        encoded.expect("Expected valid UTF8")
     }
 
     #[test]

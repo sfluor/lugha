@@ -19,3 +19,8 @@ Cargo.lock
 /target
 
 flamegraph.svg
+
+# JS stuff
+node_modules
+dist
+.bin
