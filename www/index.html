@@ -1,17 +1,18 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-
-<head>
-    <meta charset="utf-8">
+  <head>
+    <meta charset="utf-8" />
     <title>Lugha playground</title>
-</head>
+  </head>
 
-<body>
-    <noscript>This page contains webassembly and javascript content, please enable javascript in your
-        browser.</noscript>
+  <body>
+    <noscript
+      >This page contains webassembly and javascript content, please enable
+      javascript in your browser.</noscript
+    >
     <script src="./bootstrap.js"></script>
     <div id="container">
-        <div id="editor-and-ast">
+      <div id="editor-and-ast">
         <textarea id="code-editor" rows="10" cols="100">
 const fibo = func(n int) -> int {
     if n < 2 {
@@ -23,35 +24,33 @@ const fibo = func(n int) -> int {
 
 println fibo(20);
         </textarea>
-        <div id="ast">
-        </div>
-        </div>
-        <button id="btn-runcode">run code</button>
-        <pre id="code-output"></pre>
+        <div id="ast"></div>
+      </div>
+      <button id="btn-runcode">run code</button>
+      <pre id="code-output"></pre>
     </div>
-</body>
+  </body>
 
-<style>
+  <style>
     #container {
-        display: flex;
-        flex-direction: column;
-        align-content: flex-start;
-        padding: 3%;
+      display: flex;
+      flex-direction: column;
+      align-content: flex-start;
+      padding: 3%;
     }
 
     #editor-and-ast {
-        display: flex;
-        flex-direction: row;
+      display: flex;
+      flex-direction: row;
     }
 
     #ast {
-        font-family: monospace;
-        white-space: pre-wrap;
+      font-family: monospace;
+      white-space: pre-wrap;
     }
 
     .error {
-        color: red;
+      color: red;
     }
-</style>
-
+  </style>
 </html>
