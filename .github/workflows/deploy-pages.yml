@@ -12,6 +12,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v3
       - run: rustup update stable && rustup default stable
       - run: cargo install wasm-pack
       - run: wasm-pack build
@@ -20,7 +21,7 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./www/dist
-          
+
   deploy:
     permissions:
       pages: write
